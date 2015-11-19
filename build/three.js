@@ -1,1794 +1,3 @@
-// File:examples/js/controls/OrbitControls.js
-
-/**
- * @author qiao / https://github.com/qiao
- * @author mrdoob / http://mrdoob.com
- * @author alteredq / http://alteredqualia.com/
- * @author WestLangley / http://github.com/WestLangley
- * @author erich666 / http://erichaines.com
- */
-/*global THREE, console */
-
-( function () {
-
-	function OrbitConstraint ( object ) {
-
-		this.object = object;
-
-		// "target" sets the location of focus, where the object orbits around
-		// and where it pans with respect to.
-		this.target = new THREE.Vector3();
-
-		// Limits to how far you can dolly in and out ( PerspectiveCamera only )
-		this.minDistance = 0;
-		this.maxDistance = Infinity;
-
-		// Limits to how far you can zoom in and out ( OrthographicCamera only )
-		this.minZoom = 0;
-		this.maxZoom = Infinity;
-
-		// How far you can orbit vertically, upper and lower limits.
-		// Range is 0 to Math.PI radians.
-		this.minPolarAngle = 0; // radians
-		this.maxPolarAngle = Math.PI; // radians
-
-		// How far you can orbit horizontally, upper and lower limits.
-		// If set, must be a sub-interval of the interval [ - Math.PI, Math.PI ].
-		this.minAzimuthAngle = - Infinity; // radians
-		this.maxAzimuthAngle = Infinity; // radians
-
-		// Set to true to enable damping (inertia)
-		// If damping is enabled, you must call controls.update() in your animation loop
-		this.enableDamping = false;
-		this.dampingFactor = 0.25;
-
-		////////////
-		// internals
-
-		var scope = this;
-
-		var EPS = 0.000001;
-
-		// Current position in spherical coordinate system.
-		var theta;
-		var phi;
-
-		// Pending changes
-		var phiDelta = 0;
-		var thetaDelta = 0;
-		var scale = 1;
-		var panOffset = new THREE.Vector3();
-		var zoomChanged = false;
-
-		// API
-
-		this.getPolarAngle = function () {
-
-			return phi;
-
-		};
-
-		this.getAzimuthalAngle = function () {
-
-			return theta;
-
-		};
-
-		this.rotateLeft = function ( angle ) {
-
-			thetaDelta -= angle;
-
-		};
-
-		this.rotateUp = function ( angle ) {
-
-			phiDelta -= angle;
-
-		};
-
-		// pass in distance in world space to move left
-		this.panLeft = function() {
-
-			var v = new THREE.Vector3();
-
-			return function panLeft ( distance ) {
-
-				var te = this.object.matrix.elements;
-
-				// get X column of matrix
-				v.set( te[ 0 ], te[ 1 ], te[ 2 ] );
-				v.multiplyScalar( - distance );
-
-				panOffset.add( v );
-
-			};
-
-		}();
-
-		// pass in distance in world space to move up
-		this.panUp = function() {
-
-			var v = new THREE.Vector3();
-
-			return function panUp ( distance ) {
-
-				var te = this.object.matrix.elements;
-
-				// get Y column of matrix
-				v.set( te[ 4 ], te[ 5 ], te[ 6 ] );
-				v.multiplyScalar( distance );
-
-				panOffset.add( v );
-
-			};
-
-		}();
-
-		// pass in x,y of change desired in pixel space,
-		// right and down are positive
-		this.pan = function ( deltaX, deltaY, screenWidth, screenHeight ) {
-
-			if ( scope.object instanceof THREE.PerspectiveCamera ) {
-
-				// perspective
-				var position = scope.object.position;
-				var offset = position.clone().sub( scope.target );
-				var targetDistance = offset.length();
-
-				// half of the fov is center to top of screen
-				targetDistance *= Math.tan( ( scope.object.fov / 2 ) * Math.PI / 180.0 );
-
-				// we actually don't use screenWidth, since perspective camera is fixed to screen height
-				scope.panLeft( 2 * deltaX * targetDistance / screenHeight );
-				scope.panUp( 2 * deltaY * targetDistance / screenHeight );
-
-			} else if ( scope.object instanceof THREE.OrthographicCamera ) {
-
-				// orthographic
-				scope.panLeft( deltaX * ( scope.object.right - scope.object.left ) / screenWidth );
-				scope.panUp( deltaY * ( scope.object.top - scope.object.bottom ) / screenHeight );
-
-			} else {
-
-				// camera neither orthographic or perspective
-				console.warn( 'WARNING: OrbitControls.js encountered an unknown camera type - pan disabled.' );
-
-			}
-
-		};
-
-		this.dollyIn = function ( dollyScale ) {
-
-			if ( scope.object instanceof THREE.PerspectiveCamera ) {
-
-				scale /= dollyScale;
-
-			} else if ( scope.object instanceof THREE.OrthographicCamera ) {
-
-				scope.object.zoom = Math.max( this.minZoom, Math.min( this.maxZoom, this.object.zoom * dollyScale ) );
-				scope.object.updateProjectionMatrix();
-				zoomChanged = true;
-
-			} else {
-
-				console.warn( 'WARNING: OrbitControls.js encountered an unknown camera type - dolly/zoom disabled.' );
-
-			}
-
-		};
-
-		this.dollyOut = function ( dollyScale ) {
-
-			if ( scope.object instanceof THREE.PerspectiveCamera ) {
-
-				scale *= dollyScale;
-
-			} else if ( scope.object instanceof THREE.OrthographicCamera ) {
-
-				scope.object.zoom = Math.max( this.minZoom, Math.min( this.maxZoom, this.object.zoom / dollyScale ) );
-				scope.object.updateProjectionMatrix();
-				zoomChanged = true;
-
-			} else {
-
-				console.warn( 'WARNING: OrbitControls.js encountered an unknown camera type - dolly/zoom disabled.' );
-
-			}
-
-		};
-
-		this.update = function() {
-
-			var offset = new THREE.Vector3();
-
-			// so camera.up is the orbit axis
-			var quat = new THREE.Quaternion().setFromUnitVectors( object.up, new THREE.Vector3( 0, 1, 0 ) );
-			var quatInverse = quat.clone().inverse();
-
-			var lastPosition = new THREE.Vector3();
-			var lastQuaternion = new THREE.Quaternion();
-
-			return function () {
-
-				var position = this.object.position;
-
-				offset.copy( position ).sub( this.target );
-
-				// rotate offset to "y-axis-is-up" space
-				offset.applyQuaternion( quat );
-
-				// angle from z-axis around y-axis
-
-				theta = Math.atan2( offset.x, offset.z );
-
-				// angle from y-axis
-
-				phi = Math.atan2( Math.sqrt( offset.x * offset.x + offset.z * offset.z ), offset.y );
-
-				theta += thetaDelta;
-				phi += phiDelta;
-
-				// restrict theta to be between desired limits
-				theta = Math.max( this.minAzimuthAngle, Math.min( this.maxAzimuthAngle, theta ) );
-
-				// restrict phi to be between desired limits
-				phi = Math.max( this.minPolarAngle, Math.min( this.maxPolarAngle, phi ) );
-
-				// restrict phi to be betwee EPS and PI-EPS
-				phi = Math.max( EPS, Math.min( Math.PI - EPS, phi ) );
-
-				var radius = offset.length() * scale;
-
-				// restrict radius to be between desired limits
-				radius = Math.max( this.minDistance, Math.min( this.maxDistance, radius ) );
-
-				// move target to panned location
-				this.target.add( panOffset );
-
-				offset.x = radius * Math.sin( phi ) * Math.sin( theta );
-				offset.y = radius * Math.cos( phi );
-				offset.z = radius * Math.sin( phi ) * Math.cos( theta );
-
-				// rotate offset back to "camera-up-vector-is-up" space
-				offset.applyQuaternion( quatInverse );
-
-				position.copy( this.target ).add( offset );
-
-				this.object.lookAt( this.target );
-
-				if ( this.enableDamping === true ) {
-
-					thetaDelta *= ( 1 - this.dampingFactor );
-					phiDelta *= ( 1 - this.dampingFactor );
-
-				} else {
-
-					thetaDelta = 0;
-					phiDelta = 0;
-
-				}
-
-				scale = 1;
-				panOffset.set( 0, 0, 0 );
-
-				// update condition is:
-				// min(camera displacement, camera rotation in radians)^2 > EPS
-				// using small-angle approximation cos(x/2) = 1 - x^2 / 8
-
-				if ( zoomChanged ||
-					 lastPosition.distanceToSquared( this.object.position ) > EPS ||
-				    8 * ( 1 - lastQuaternion.dot( this.object.quaternion ) ) > EPS ) {
-
-					lastPosition.copy( this.object.position );
-					lastQuaternion.copy( this.object.quaternion );
-					zoomChanged = false;
-
-					return true;
-
-				}
-
-				return false;
-
-			};
-
-		}();
-
-	};
-
-
-	// This set of controls performs orbiting, dollying (zooming), and panning. It maintains
-	// the "up" direction as +Y, unlike the TrackballControls. Touch on tablet and phones is
-	// supported.
-	//
-	//    Orbit - left mouse / touch: one finger move
-	//    Zoom - middle mouse, or mousewheel / touch: two finger spread or squish
-	//    Pan - right mouse, or arrow keys / touch: three finter swipe
-
-	THREE.OrbitControls = function ( object, domElement ) {
-
-		var constraint = new OrbitConstraint( object );
-
-		this.domElement = ( domElement !== undefined ) ? domElement : document;
-
-		// API
-
-		Object.defineProperty( this, 'constraint', {
-
-			get: function() {
-
-				return constraint;
-
-			}
-
-		} );
-
-		this.getPolarAngle = function () {
-
-			return constraint.getPolarAngle();
-
-		};
-
-		this.getAzimuthalAngle = function () {
-
-			return constraint.getAzimuthalAngle();
-
-		};
-
-		// Set to false to disable this control
-		this.enabled = true;
-
-		// center is old, deprecated; use "target" instead
-		this.center = this.target;
-
-		// This option actually enables dollying in and out; left as "zoom" for
-		// backwards compatibility.
-		// Set to false to disable zooming
-		this.enableZoom = true;
-		this.zoomSpeed = 1.0;
-
-		// Set to false to disable rotating
-		this.enableRotate = true;
-		this.rotateSpeed = 1.0;
-
-		// Set to false to disable panning
-		this.enablePan = true;
-		this.keyPanSpeed = 7.0;	// pixels moved per arrow key push
-
-		// Set to true to automatically rotate around the target
-		// If auto-rotate is enabled, you must call controls.update() in your animation loop
-		this.autoRotate = false;
-		this.autoRotateSpeed = 2.0; // 30 seconds per round when fps is 60
-
-		// Set to false to disable use of the keys
-		this.enableKeys = true;
-
-		// The four arrow keys
-		this.keys = { LEFT: 37, UP: 38, RIGHT: 39, BOTTOM: 40 };
-
-		// Mouse buttons
-		this.mouseButtons = { ORBIT: THREE.MOUSE.LEFT, ZOOM: THREE.MOUSE.MIDDLE, PAN: THREE.MOUSE.RIGHT };
-
-		////////////
-		// internals
-
-		var scope = this;
-
-		var rotateStart = new THREE.Vector2();
-		var rotateEnd = new THREE.Vector2();
-		var rotateDelta = new THREE.Vector2();
-
-		var panStart = new THREE.Vector2();
-		var panEnd = new THREE.Vector2();
-		var panDelta = new THREE.Vector2();
-
-		var dollyStart = new THREE.Vector2();
-		var dollyEnd = new THREE.Vector2();
-		var dollyDelta = new THREE.Vector2();
-
-		var STATE = { NONE : - 1, ROTATE : 0, DOLLY : 1, PAN : 2, TOUCH_ROTATE : 3, TOUCH_DOLLY : 4, TOUCH_PAN : 5 };
-
-		var state = STATE.NONE;
-
-		// for reset
-
-		this.target0 = this.target.clone();
-		this.position0 = this.object.position.clone();
-		this.zoom0 = this.object.zoom;
-
-		// events
-
-		var changeEvent = { type: 'change' };
-		var startEvent = { type: 'start' };
-		var endEvent = { type: 'end' };
-
-		// pass in x,y of change desired in pixel space,
-		// right and down are positive
-		function pan( deltaX, deltaY ) {
-
-			var element = scope.domElement === document ? scope.domElement.body : scope.domElement;
-
-			constraint.pan( deltaX, deltaY, element.clientWidth, element.clientHeight );
-
-		}
-
-		this.update = function () {
-
-			if ( this.autoRotate && state === STATE.NONE ) {
-
-				constraint.rotateLeft( getAutoRotationAngle() );
-
-			}
-
-			if ( constraint.update() === true ) {
-
-				this.dispatchEvent( changeEvent );
-
-			}
-
-		};
-
-		this.reset = function () {
-
-			state = STATE.NONE;
-
-			this.target.copy( this.target0 );
-			this.object.position.copy( this.position0 );
-			this.object.zoom = this.zoom0;
-
-			this.object.updateProjectionMatrix();
-			this.dispatchEvent( changeEvent );
-
-			this.update();
-
-		};
-
-		function getAutoRotationAngle() {
-
-			return 2 * Math.PI / 60 / 60 * scope.autoRotateSpeed;
-
-		}
-
-		function getZoomScale() {
-
-			return Math.pow( 0.95, scope.zoomSpeed );
-
-		}
-
-		function onMouseDown( event ) {
-
-			if ( scope.enabled === false ) return;
-
-			event.preventDefault();
-
-			if ( event.button === scope.mouseButtons.ORBIT ) {
-
-				if ( scope.enableRotate === false ) return;
-
-				state = STATE.ROTATE;
-
-				rotateStart.set( event.clientX, event.clientY );
-
-			} else if ( event.button === scope.mouseButtons.ZOOM ) {
-
-				if ( scope.enableZoom === false ) return;
-
-				state = STATE.DOLLY;
-
-				dollyStart.set( event.clientX, event.clientY );
-
-			} else if ( event.button === scope.mouseButtons.PAN ) {
-
-				if ( scope.enablePan === false ) return;
-
-				state = STATE.PAN;
-
-				panStart.set( event.clientX, event.clientY );
-
-			}
-
-			if ( state !== STATE.NONE ) {
-
-				document.addEventListener( 'mousemove', onMouseMove, false );
-				document.addEventListener( 'mouseup', onMouseUp, false );
-				scope.dispatchEvent( startEvent );
-
-			}
-
-		}
-
-		function onMouseMove( event ) {
-
-			if ( scope.enabled === false ) return;
-
-			event.preventDefault();
-
-			var element = scope.domElement === document ? scope.domElement.body : scope.domElement;
-
-			if ( state === STATE.ROTATE ) {
-
-				if ( scope.enableRotate === false ) return;
-
-				rotateEnd.set( event.clientX, event.clientY );
-				rotateDelta.subVectors( rotateEnd, rotateStart );
-
-				// rotating across whole screen goes 360 degrees around
-				constraint.rotateLeft( 2 * Math.PI * rotateDelta.x / element.clientWidth * scope.rotateSpeed );
-
-				// rotating up and down along whole screen attempts to go 360, but limited to 180
-				constraint.rotateUp( 2 * Math.PI * rotateDelta.y / element.clientHeight * scope.rotateSpeed );
-
-				rotateStart.copy( rotateEnd );
-
-			} else if ( state === STATE.DOLLY ) {
-
-				if ( scope.enableZoom === false ) return;
-
-				dollyEnd.set( event.clientX, event.clientY );
-				dollyDelta.subVectors( dollyEnd, dollyStart );
-
-				if ( dollyDelta.y > 0 ) {
-
-					constraint.dollyIn( getZoomScale() );
-
-				} else if ( dollyDelta.y < 0 ) {
-
-					constraint.dollyOut( getZoomScale() );
-
-				}
-
-				dollyStart.copy( dollyEnd );
-
-			} else if ( state === STATE.PAN ) {
-
-				if ( scope.enablePan === false ) return;
-
-				panEnd.set( event.clientX, event.clientY );
-				panDelta.subVectors( panEnd, panStart );
-
-				pan( panDelta.x, panDelta.y );
-
-				panStart.copy( panEnd );
-
-			}
-
-			if ( state !== STATE.NONE ) scope.update();
-
-		}
-
-		function onMouseUp( /* event */ ) {
-
-			if ( scope.enabled === false ) return;
-
-			document.removeEventListener( 'mousemove', onMouseMove, false );
-			document.removeEventListener( 'mouseup', onMouseUp, false );
-			scope.dispatchEvent( endEvent );
-			state = STATE.NONE;
-
-		}
-
-		function onMouseWheel( event ) {
-
-			if ( scope.enabled === false || scope.enableZoom === false || state !== STATE.NONE ) return;
-
-			event.preventDefault();
-			event.stopPropagation();
-
-			var delta = 0;
-
-			if ( event.wheelDelta !== undefined ) {
-
-				// WebKit / Opera / Explorer 9
-
-				delta = event.wheelDelta;
-
-			} else if ( event.detail !== undefined ) {
-
-				// Firefox
-
-				delta = - event.detail;
-
-			}
-
-			if ( delta > 0 ) {
-
-				constraint.dollyOut( getZoomScale() );
-
-			} else if ( delta < 0 ) {
-
-				constraint.dollyIn( getZoomScale() );
-
-			}
-
-			scope.update();
-			scope.dispatchEvent( startEvent );
-			scope.dispatchEvent( endEvent );
-
-		}
-
-		function onKeyDown( event ) {
-
-			if ( scope.enabled === false || scope.enableKeys === false || scope.enablePan === false ) return;
-
-			switch ( event.keyCode ) {
-
-				case scope.keys.UP:
-					pan( 0, scope.keyPanSpeed );
-					scope.update();
-					break;
-
-				case scope.keys.BOTTOM:
-					pan( 0, - scope.keyPanSpeed );
-					scope.update();
-					break;
-
-				case scope.keys.LEFT:
-					pan( scope.keyPanSpeed, 0 );
-					scope.update();
-					break;
-
-				case scope.keys.RIGHT:
-					pan( - scope.keyPanSpeed, 0 );
-					scope.update();
-					break;
-
-			}
-
-		}
-
-		function touchstart( event ) {
-
-			if ( scope.enabled === false ) return;
-
-			switch ( event.touches.length ) {
-
-				case 1:	// one-fingered touch: rotate
-
-					if ( scope.enableRotate === false ) return;
-
-					state = STATE.TOUCH_ROTATE;
-
-					rotateStart.set( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY );
-					break;
-
-				case 2:	// two-fingered touch: dolly
-
-					if ( scope.enableZoom === false ) return;
-
-					state = STATE.TOUCH_DOLLY;
-
-					var dx = event.touches[ 0 ].pageX - event.touches[ 1 ].pageX;
-					var dy = event.touches[ 0 ].pageY - event.touches[ 1 ].pageY;
-					var distance = Math.sqrt( dx * dx + dy * dy );
-					dollyStart.set( 0, distance );
-					break;
-
-				case 3: // three-fingered touch: pan
-
-					if ( scope.enablePan === false ) return;
-
-					state = STATE.TOUCH_PAN;
-
-					panStart.set( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY );
-					break;
-
-				default:
-
-					state = STATE.NONE;
-
-			}
-
-			if ( state !== STATE.NONE ) scope.dispatchEvent( startEvent );
-
-		}
-
-		function touchmove( event ) {
-
-			if ( scope.enabled === false ) return;
-
-			event.preventDefault();
-			event.stopPropagation();
-
-			var element = scope.domElement === document ? scope.domElement.body : scope.domElement;
-
-			switch ( event.touches.length ) {
-
-				case 1: // one-fingered touch: rotate
-
-					if ( scope.enableRotate === false ) return;
-					if ( state !== STATE.TOUCH_ROTATE ) return;
-
-					rotateEnd.set( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY );
-					rotateDelta.subVectors( rotateEnd, rotateStart );
-
-					// rotating across whole screen goes 360 degrees around
-					constraint.rotateLeft( 2 * Math.PI * rotateDelta.x / element.clientWidth * scope.rotateSpeed );
-					// rotating up and down along whole screen attempts to go 360, but limited to 180
-					constraint.rotateUp( 2 * Math.PI * rotateDelta.y / element.clientHeight * scope.rotateSpeed );
-
-					rotateStart.copy( rotateEnd );
-
-					scope.update();
-					break;
-
-				case 2: // two-fingered touch: dolly
-
-					if ( scope.enableZoom === false ) return;
-					if ( state !== STATE.TOUCH_DOLLY ) return;
-
-					var dx = event.touches[ 0 ].pageX - event.touches[ 1 ].pageX;
-					var dy = event.touches[ 0 ].pageY - event.touches[ 1 ].pageY;
-					var distance = Math.sqrt( dx * dx + dy * dy );
-
-					dollyEnd.set( 0, distance );
-					dollyDelta.subVectors( dollyEnd, dollyStart );
-
-					if ( dollyDelta.y > 0 ) {
-
-						constraint.dollyOut( getZoomScale() );
-
-					} else if ( dollyDelta.y < 0 ) {
-
-						constraint.dollyIn( getZoomScale() );
-
-					}
-
-					dollyStart.copy( dollyEnd );
-
-					scope.update();
-					break;
-
-				case 3: // three-fingered touch: pan
-
-					if ( scope.enablePan === false ) return;
-					if ( state !== STATE.TOUCH_PAN ) return;
-
-					panEnd.set( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY );
-					panDelta.subVectors( panEnd, panStart );
-
-					pan( panDelta.x, panDelta.y );
-
-					panStart.copy( panEnd );
-
-					scope.update();
-					break;
-
-				default:
-
-					state = STATE.NONE;
-
-			}
-
-		}
-
-		function touchend( /* event */ ) {
-
-			if ( scope.enabled === false ) return;
-
-			scope.dispatchEvent( endEvent );
-			state = STATE.NONE;
-
-		}
-
-		function contextmenu( event ) {
-
-			event.preventDefault();
-
-		}
-
-		this.dispose = function() {
-
-			this.domElement.removeEventListener( 'contextmenu', contextmenu, false );
-			this.domElement.removeEventListener( 'mousedown', onMouseDown, false );
-			this.domElement.removeEventListener( 'mousewheel', onMouseWheel, false );
-			this.domElement.removeEventListener( 'MozMousePixelScroll', onMouseWheel, false ); // firefox
-
-			this.domElement.removeEventListener( 'touchstart', touchstart, false );
-			this.domElement.removeEventListener( 'touchend', touchend, false );
-			this.domElement.removeEventListener( 'touchmove', touchmove, false );
-
-			document.removeEventListener( 'mousemove', onMouseMove, false );
-			document.removeEventListener( 'mouseup', onMouseUp, false );
-
-			window.removeEventListener( 'keydown', onKeyDown, false );
-
-		}
-
-		this.domElement.addEventListener( 'contextmenu', contextmenu, false );
-
-		this.domElement.addEventListener( 'mousedown', onMouseDown, false );
-		this.domElement.addEventListener( 'mousewheel', onMouseWheel, false );
-		this.domElement.addEventListener( 'MozMousePixelScroll', onMouseWheel, false ); // firefox
-
-		this.domElement.addEventListener( 'touchstart', touchstart, false );
-		this.domElement.addEventListener( 'touchend', touchend, false );
-		this.domElement.addEventListener( 'touchmove', touchmove, false );
-
-		window.addEventListener( 'keydown', onKeyDown, false );
-
-		// force an update at start
-		this.update();
-
-	};
-
-	THREE.OrbitControls.prototype = Object.create( THREE.EventDispatcher.prototype );
-	THREE.OrbitControls.prototype.constructor = THREE.OrbitControls;
-
-	Object.defineProperties( THREE.OrbitControls.prototype, {
-
-		object: {
-
-			get: function () {
-
-				return this.constraint.object;
-
-			}
-
-		},
-
-		target: {
-
-			get: function () {
-
-				return this.constraint.target;
-
-			},
-
-			set: function ( value ) {
-
-				console.warn( 'THREE.OrbitControls: target is now immutable. Use target.set() instead.' );
-				this.constraint.target.copy( value );
-
-			}
-
-		},
-
-		minDistance : {
-
-			get: function () {
-
-				return this.constraint.minDistance;
-
-			},
-
-			set: function ( value ) {
-
-				this.constraint.minDistance = value;
-
-			}
-
-		},
-
-		maxDistance : {
-
-			get: function () {
-
-				return this.constraint.maxDistance;
-
-			},
-
-			set: function ( value ) {
-
-				this.constraint.maxDistance = value;
-
-			}
-
-		},
-
-		minZoom : {
-
-			get: function () {
-
-				return this.constraint.minZoom;
-
-			},
-
-			set: function ( value ) {
-
-				this.constraint.minZoom = value;
-
-			}
-
-		},
-
-		maxZoom : {
-
-			get: function () {
-
-				return this.constraint.maxZoom;
-
-			},
-
-			set: function ( value ) {
-
-				this.constraint.maxZoom = value;
-
-			}
-
-		},
-
-		minPolarAngle : {
-
-			get: function () {
-
-				return this.constraint.minPolarAngle;
-
-			},
-
-			set: function ( value ) {
-
-				this.constraint.minPolarAngle = value;
-
-			}
-
-		},
-
-		maxPolarAngle : {
-
-			get: function () {
-
-				return this.constraint.maxPolarAngle;
-
-			},
-
-			set: function ( value ) {
-
-				this.constraint.maxPolarAngle = value;
-
-			}
-
-		},
-
-		minAzimuthAngle : {
-
-			get: function () {
-
-				return this.constraint.minAzimuthAngle;
-
-			},
-
-			set: function ( value ) {
-
-				this.constraint.minAzimuthAngle = value;
-
-			}
-
-		},
-
-		maxAzimuthAngle : {
-
-			get: function () {
-
-				return this.constraint.maxAzimuthAngle;
-
-			},
-
-			set: function ( value ) {
-
-				this.constraint.maxAzimuthAngle = value;
-
-			}
-
-		},
-
-		enableDamping : {
-
-			get: function () {
-
-				return this.constraint.enableDamping;
-
-			},
-
-			set: function ( value ) {
-
-				this.constraint.enableDamping = value;
-
-			}
-
-		},
-
-		dampingFactor : {
-
-			get: function () {
-
-				return this.constraint.dampingFactor;
-
-			},
-
-			set: function ( value ) {
-
-				this.constraint.dampingFactor = value;
-
-			}
-
-		},
-
-		// backward compatibility
-
-		noZoom: {
-
-			get: function () {
-
-				console.warn( 'THREE.OrbitControls: .noZoom has been deprecated. Use .enableZoom instead.' );
-				return ! this.enableZoom;
-
-			},
-
-			set: function ( value ) {
-
-				console.warn( 'THREE.OrbitControls: .noZoom has been deprecated. Use .enableZoom instead.' );
-				this.enableZoom = ! value;
-
-			}
-
-		},
-
-		noRotate: {
-
-			get: function () {
-
-				console.warn( 'THREE.OrbitControls: .noRotate has been deprecated. Use .enableRotate instead.' );
-				return ! this.enableRotate;
-
-			},
-
-			set: function ( value ) {
-
-				console.warn( 'THREE.OrbitControls: .noRotate has been deprecated. Use .enableRotate instead.' );
-				this.enableRotate = ! value;
-
-			}
-
-		},
-
-		noPan: {
-
-			get: function () {
-
-				console.warn( 'THREE.OrbitControls: .noPan has been deprecated. Use .enablePan instead.' );
-				return ! this.enablePan;
-
-			},
-
-			set: function ( value ) {
-
-				console.warn( 'THREE.OrbitControls: .noPan has been deprecated. Use .enablePan instead.' );
-				this.enablePan = ! value;
-
-			}
-
-		},
-
-		noKeys: {
-
-			get: function () {
-
-				console.warn( 'THREE.OrbitControls: .noKeys has been deprecated. Use .enableKeys instead.' );
-				return ! this.enableKeys;
-
-			},
-
-			set: function ( value ) {
-
-				console.warn( 'THREE.OrbitControls: .noKeys has been deprecated. Use .enableKeys instead.' );
-				this.enableKeys = ! value;
-
-			}
-
-		},
-
-		staticMoving : {
-
-			get: function () {
-
-				console.warn( 'THREE.OrbitControls: .staticMoving has been deprecated. Use .enableDamping instead.' );
-				return ! this.constraint.enableDamping;
-
-			},
-
-			set: function ( value ) {
-
-				console.warn( 'THREE.OrbitControls: .staticMoving has been deprecated. Use .enableDamping instead.' );
-				this.constraint.enableDamping = ! value;
-
-			}
-
-		},
-
-		dynamicDampingFactor : {
-
-			get: function () {
-
-				console.warn( 'THREE.OrbitControls: .dynamicDampingFactor has been renamed. Use .dampingFactor instead.' );
-				return this.constraint.dampingFactor;
-
-			},
-
-			set: function ( value ) {
-
-				console.warn( 'THREE.OrbitControls: .dynamicDampingFactor has been renamed. Use .dampingFactor instead.' );
-				this.constraint.dampingFactor = value;
-
-			}
-
-		}
-
-	} );
-
-}() );
-
-// File:examples/js/controls/TrackballControls.js
-
-/**
- * @author Eberhard Graether / http://egraether.com/
- * @author Mark Lundin 	/ http://mark-lundin.com
- * @author Simone Manini / http://daron1337.github.io
- * @author Luca Antiga 	/ http://lantiga.github.io
- */
-
-THREE.TrackballControls = function ( object, domElement ) {
-
-	var _this = this;
-	var STATE = { NONE: - 1, ROTATE: 0, ZOOM: 1, PAN: 2, TOUCH_ROTATE: 3, TOUCH_ZOOM_PAN: 4 };
-
-	this.object = object;
-	this.domElement = ( domElement !== undefined ) ? domElement : document;
-
-	// API
-
-	this.enabled = true;
-
-	this.screen = { left: 0, top: 0, width: 0, height: 0 };
-
-	this.rotateSpeed = 1.0;
-	this.zoomSpeed = 1.2;
-	this.panSpeed = 0.3;
-
-	this.noRotate = false;
-	this.noZoom = false;
-	this.noPan = false;
-
-	this.staticMoving = false;
-	this.dynamicDampingFactor = 0.2;
-
-	this.minDistance = 0;
-	this.maxDistance = Infinity;
-
-	this.keys = [ 65 /*A*/, 83 /*S*/, 68 /*D*/ ];
-
-	// internals
-
-	this.target = new THREE.Vector3();
-
-	var EPS = 0.000001;
-
-	var lastPosition = new THREE.Vector3();
-
-	var _state = STATE.NONE,
-	_prevState = STATE.NONE,
-
-	_eye = new THREE.Vector3(),
-
-	_movePrev = new THREE.Vector2(),
-	_moveCurr = new THREE.Vector2(),
-
-	_lastAxis = new THREE.Vector3(),
-	_lastAngle = 0,
-
-	_zoomStart = new THREE.Vector2(),
-	_zoomEnd = new THREE.Vector2(),
-
-	_touchZoomDistanceStart = 0,
-	_touchZoomDistanceEnd = 0,
-
-	_panStart = new THREE.Vector2(),
-	_panEnd = new THREE.Vector2();
-
-	// for reset
-
-	this.target0 = this.target.clone();
-	this.position0 = this.object.position.clone();
-	this.up0 = this.object.up.clone();
-
-	// events
-
-	var changeEvent = { type: 'change' };
-	var startEvent = { type: 'start' };
-	var endEvent = { type: 'end' };
-
-
-	// methods
-
-	this.handleResize = function () {
-
-		if ( this.domElement === document ) {
-
-			this.screen.left = 0;
-			this.screen.top = 0;
-			this.screen.width = window.innerWidth;
-			this.screen.height = window.innerHeight;
-
-		} else {
-
-			var box = this.domElement.getBoundingClientRect();
-			// adjustments come from similar code in the jquery offset() function
-			var d = this.domElement.ownerDocument.documentElement;
-			this.screen.left = box.left + window.pageXOffset - d.clientLeft;
-			this.screen.top = box.top + window.pageYOffset - d.clientTop;
-			this.screen.width = box.width;
-			this.screen.height = box.height;
-
-		}
-
-	};
-
-	this.handleEvent = function ( event ) {
-
-		if ( typeof this[ event.type ] == 'function' ) {
-
-			this[ event.type ]( event );
-
-		}
-
-	};
-
-	var getMouseOnScreen = ( function () {
-
-		var vector = new THREE.Vector2();
-
-		return function getMouseOnScreen( pageX, pageY ) {
-
-			vector.set(
-				( pageX - _this.screen.left ) / _this.screen.width,
-				( pageY - _this.screen.top ) / _this.screen.height
-			);
-
-			return vector;
-
-		};
-
-	}() );
-
-	var getMouseOnCircle = ( function () {
-
-		var vector = new THREE.Vector2();
-
-		return function getMouseOnCircle( pageX, pageY ) {
-
-			vector.set(
-				( ( pageX - _this.screen.width * 0.5 - _this.screen.left ) / ( _this.screen.width * 0.5 ) ),
-				( ( _this.screen.height + 2 * ( _this.screen.top - pageY ) ) / _this.screen.width ) // screen.width intentional
-			);
-
-			return vector;
-
-		};
-
-	}() );
-
-	this.rotateCamera = ( function() {
-
-		var axis = new THREE.Vector3(),
-			quaternion = new THREE.Quaternion(),
-			eyeDirection = new THREE.Vector3(),
-			objectUpDirection = new THREE.Vector3(),
-			objectSidewaysDirection = new THREE.Vector3(),
-			moveDirection = new THREE.Vector3(),
-			angle;
-
-		return function rotateCamera() {
-
-			moveDirection.set( _moveCurr.x - _movePrev.x, _moveCurr.y - _movePrev.y, 0 );
-			angle = moveDirection.length();
-
-			if ( angle ) {
-
-				_eye.copy( _this.object.position ).sub( _this.target );
-
-				eyeDirection.copy( _eye ).normalize();
-				objectUpDirection.copy( _this.object.up ).normalize();
-				objectSidewaysDirection.crossVectors( objectUpDirection, eyeDirection ).normalize();
-
-				objectUpDirection.setLength( _moveCurr.y - _movePrev.y );
-				objectSidewaysDirection.setLength( _moveCurr.x - _movePrev.x );
-
-				moveDirection.copy( objectUpDirection.add( objectSidewaysDirection ) );
-
-				axis.crossVectors( moveDirection, _eye ).normalize();
-
-				angle *= _this.rotateSpeed;
-				quaternion.setFromAxisAngle( axis, angle );
-
-				_eye.applyQuaternion( quaternion );
-				_this.object.up.applyQuaternion( quaternion );
-
-				_lastAxis.copy( axis );
-				_lastAngle = angle;
-
-			} else if ( ! _this.staticMoving && _lastAngle ) {
-
-				_lastAngle *= Math.sqrt( 1.0 - _this.dynamicDampingFactor );
-				_eye.copy( _this.object.position ).sub( _this.target );
-				quaternion.setFromAxisAngle( _lastAxis, _lastAngle );
-				_eye.applyQuaternion( quaternion );
-				_this.object.up.applyQuaternion( quaternion );
-
-			}
-
-			_movePrev.copy( _moveCurr );
-
-		};
-
-	}() );
-
-
-	this.zoomCamera = function () {
-
-		var factor;
-
-		if ( _state === STATE.TOUCH_ZOOM_PAN ) {
-
-			factor = _touchZoomDistanceStart / _touchZoomDistanceEnd;
-			_touchZoomDistanceStart = _touchZoomDistanceEnd;
-			_eye.multiplyScalar( factor );
-
-		} else {
-
-			factor = 1.0 + ( _zoomEnd.y - _zoomStart.y ) * _this.zoomSpeed;
-
-			if ( factor !== 1.0 && factor > 0.0 ) {
-
-				_eye.multiplyScalar( factor );
-
-				if ( _this.staticMoving ) {
-
-					_zoomStart.copy( _zoomEnd );
-
-				} else {
-
-					_zoomStart.y += ( _zoomEnd.y - _zoomStart.y ) * this.dynamicDampingFactor;
-
-				}
-
-			}
-
-		}
-
-	};
-
-	this.panCamera = ( function() {
-
-		var mouseChange = new THREE.Vector2(),
-			objectUp = new THREE.Vector3(),
-			pan = new THREE.Vector3();
-
-		return function panCamera() {
-
-			mouseChange.copy( _panEnd ).sub( _panStart );
-
-			if ( mouseChange.lengthSq() ) {
-
-				mouseChange.multiplyScalar( _eye.length() * _this.panSpeed );
-
-				pan.copy( _eye ).cross( _this.object.up ).setLength( mouseChange.x );
-				pan.add( objectUp.copy( _this.object.up ).setLength( mouseChange.y ) );
-
-				_this.object.position.add( pan );
-				_this.target.add( pan );
-
-				if ( _this.staticMoving ) {
-
-					_panStart.copy( _panEnd );
-
-				} else {
-
-					_panStart.add( mouseChange.subVectors( _panEnd, _panStart ).multiplyScalar( _this.dynamicDampingFactor ) );
-
-				}
-
-			}
-
-		};
-
-	}() );
-
-	this.checkDistances = function () {
-
-		if ( ! _this.noZoom || ! _this.noPan ) {
-
-			if ( _eye.lengthSq() > _this.maxDistance * _this.maxDistance ) {
-
-				_this.object.position.addVectors( _this.target, _eye.setLength( _this.maxDistance ) );
-				_zoomStart.copy( _zoomEnd );
-
-			}
-
-			if ( _eye.lengthSq() < _this.minDistance * _this.minDistance ) {
-
-				_this.object.position.addVectors( _this.target, _eye.setLength( _this.minDistance ) );
-				_zoomStart.copy( _zoomEnd );
-
-			}
-
-		}
-
-	};
-
-	this.update = function () {
-
-		_eye.subVectors( _this.object.position, _this.target );
-
-		if ( ! _this.noRotate ) {
-
-			_this.rotateCamera();
-
-		}
-
-		if ( ! _this.noZoom ) {
-
-			_this.zoomCamera();
-
-		}
-
-		if ( ! _this.noPan ) {
-
-			_this.panCamera();
-
-		}
-
-		_this.object.position.addVectors( _this.target, _eye );
-
-		_this.checkDistances();
-
-		_this.object.lookAt( _this.target );
-
-		if ( lastPosition.distanceToSquared( _this.object.position ) > EPS ) {
-
-			_this.dispatchEvent( changeEvent );
-
-			lastPosition.copy( _this.object.position );
-
-		}
-
-	};
-
-	this.reset = function () {
-
-		_state = STATE.NONE;
-		_prevState = STATE.NONE;
-
-		_this.target.copy( _this.target0 );
-		_this.object.position.copy( _this.position0 );
-		_this.object.up.copy( _this.up0 );
-
-		_eye.subVectors( _this.object.position, _this.target );
-
-		_this.object.lookAt( _this.target );
-
-		_this.dispatchEvent( changeEvent );
-
-		lastPosition.copy( _this.object.position );
-
-	};
-
-	// listeners
-
-	function keydown( event ) {
-
-		if ( _this.enabled === false ) return;
-
-		window.removeEventListener( 'keydown', keydown );
-
-		_prevState = _state;
-
-		if ( _state !== STATE.NONE ) {
-
-			return;
-
-		} else if ( event.keyCode === _this.keys[ STATE.ROTATE ] && ! _this.noRotate ) {
-
-			_state = STATE.ROTATE;
-
-		} else if ( event.keyCode === _this.keys[ STATE.ZOOM ] && ! _this.noZoom ) {
-
-			_state = STATE.ZOOM;
-
-		} else if ( event.keyCode === _this.keys[ STATE.PAN ] && ! _this.noPan ) {
-
-			_state = STATE.PAN;
-
-		}
-
-	}
-
-	function keyup( event ) {
-
-		if ( _this.enabled === false ) return;
-
-		_state = _prevState;
-
-		window.addEventListener( 'keydown', keydown, false );
-
-	}
-
-	function mousedown( event ) {
-
-		if ( _this.enabled === false ) return;
-
-		event.preventDefault();
-		event.stopPropagation();
-
-		if ( _state === STATE.NONE ) {
-
-			_state = event.button;
-
-		}
-
-		if ( _state === STATE.ROTATE && ! _this.noRotate ) {
-
-			_moveCurr.copy( getMouseOnCircle( event.pageX, event.pageY ) );
-			_movePrev.copy( _moveCurr );
-
-		} else if ( _state === STATE.ZOOM && ! _this.noZoom ) {
-
-			_zoomStart.copy( getMouseOnScreen( event.pageX, event.pageY ) );
-			_zoomEnd.copy( _zoomStart );
-
-		} else if ( _state === STATE.PAN && ! _this.noPan ) {
-
-			_panStart.copy( getMouseOnScreen( event.pageX, event.pageY ) );
-			_panEnd.copy( _panStart );
-
-		}
-
-		document.addEventListener( 'mousemove', mousemove, false );
-		document.addEventListener( 'mouseup', mouseup, false );
-
-		_this.dispatchEvent( startEvent );
-
-	}
-
-	function mousemove( event ) {
-
-		if ( _this.enabled === false ) return;
-
-		event.preventDefault();
-		event.stopPropagation();
-
-		if ( _state === STATE.ROTATE && ! _this.noRotate ) {
-
-			_movePrev.copy( _moveCurr );
-			_moveCurr.copy( getMouseOnCircle( event.pageX, event.pageY ) );
-
-		} else if ( _state === STATE.ZOOM && ! _this.noZoom ) {
-
-			_zoomEnd.copy( getMouseOnScreen( event.pageX, event.pageY ) );
-
-		} else if ( _state === STATE.PAN && ! _this.noPan ) {
-
-			_panEnd.copy( getMouseOnScreen( event.pageX, event.pageY ) );
-
-		}
-
-	}
-
-	function mouseup( event ) {
-
-		if ( _this.enabled === false ) return;
-
-		event.preventDefault();
-		event.stopPropagation();
-
-		_state = STATE.NONE;
-
-		document.removeEventListener( 'mousemove', mousemove );
-		document.removeEventListener( 'mouseup', mouseup );
-		_this.dispatchEvent( endEvent );
-
-	}
-
-	function mousewheel( event ) {
-
-		if ( _this.enabled === false ) return;
-
-		event.preventDefault();
-		event.stopPropagation();
-
-		var delta = 0;
-
-		if ( event.wheelDelta ) {
-
-			// WebKit / Opera / Explorer 9
-
-			delta = event.wheelDelta / 40;
-
-		} else if ( event.detail ) {
-
-			// Firefox
-
-			delta = - event.detail / 3;
-
-		}
-
-		_zoomStart.y += delta * 0.01;
-		_this.dispatchEvent( startEvent );
-		_this.dispatchEvent( endEvent );
-
-	}
-
-	function touchstart( event ) {
-
-		if ( _this.enabled === false ) return;
-
-		switch ( event.touches.length ) {
-
-			case 1:
-				_state = STATE.TOUCH_ROTATE;
-				_moveCurr.copy( getMouseOnCircle( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY ) );
-				_movePrev.copy( _moveCurr );
-				break;
-
-			case 2:
-				_state = STATE.TOUCH_ZOOM_PAN;
-				var dx = event.touches[ 0 ].pageX - event.touches[ 1 ].pageX;
-				var dy = event.touches[ 0 ].pageY - event.touches[ 1 ].pageY;
-				_touchZoomDistanceEnd = _touchZoomDistanceStart = Math.sqrt( dx * dx + dy * dy );
-
-				var x = ( event.touches[ 0 ].pageX + event.touches[ 1 ].pageX ) / 2;
-				var y = ( event.touches[ 0 ].pageY + event.touches[ 1 ].pageY ) / 2;
-				_panStart.copy( getMouseOnScreen( x, y ) );
-				_panEnd.copy( _panStart );
-				break;
-
-			default:
-				_state = STATE.NONE;
-
-		}
-		_this.dispatchEvent( startEvent );
-
-
-	}
-
-	function touchmove( event ) {
-
-		if ( _this.enabled === false ) return;
-
-		event.preventDefault();
-		event.stopPropagation();
-
-		switch ( event.touches.length ) {
-
-			case 1:
-				_movePrev.copy( _moveCurr );
-				_moveCurr.copy( getMouseOnCircle(  event.touches[ 0 ].pageX, event.touches[ 0 ].pageY ) );
-				break;
-
-			case 2:
-				var dx = event.touches[ 0 ].pageX - event.touches[ 1 ].pageX;
-				var dy = event.touches[ 0 ].pageY - event.touches[ 1 ].pageY;
-				_touchZoomDistanceEnd = Math.sqrt( dx * dx + dy * dy );
-
-				var x = ( event.touches[ 0 ].pageX + event.touches[ 1 ].pageX ) / 2;
-				var y = ( event.touches[ 0 ].pageY + event.touches[ 1 ].pageY ) / 2;
-				_panEnd.copy( getMouseOnScreen( x, y ) );
-				break;
-
-			default:
-				_state = STATE.NONE;
-
-		}
-
-	}
-
-	function touchend( event ) {
-
-		if ( _this.enabled === false ) return;
-
-		switch ( event.touches.length ) {
-
-			case 1:
-				_movePrev.copy( _moveCurr );
-				_moveCurr.copy( getMouseOnCircle(  event.touches[ 0 ].pageX, event.touches[ 0 ].pageY ) );
-				break;
-
-			case 2:
-				_touchZoomDistanceStart = _touchZoomDistanceEnd = 0;
-
-				var x = ( event.touches[ 0 ].pageX + event.touches[ 1 ].pageX ) / 2;
-				var y = ( event.touches[ 0 ].pageY + event.touches[ 1 ].pageY ) / 2;
-				_panEnd.copy( getMouseOnScreen( x, y ) );
-				_panStart.copy( _panEnd );
-				break;
-
-		}
-
-		_state = STATE.NONE;
-		_this.dispatchEvent( endEvent );
-
-	}
-
-	function contextmenu( event ) {
-
-		event.preventDefault();
-
-	}
-
-	this.dispose = function() {
-
-		this.domElement.removeEventListener( 'contextmenu', contextmenu, false );
-		this.domElement.removeEventListener( 'mousedown', mousedown, false );
-		this.domElement.removeEventListener( 'mousewheel', mousewheel, false );
-		this.domElement.removeEventListener( 'MozMousePixelScroll', mousewheel, false ); // firefox
-
-		this.domElement.removeEventListener( 'touchstart', touchstart, false );
-		this.domElement.removeEventListener( 'touchend', touchend, false );
-		this.domElement.removeEventListener( 'touchmove', touchmove, false );
-
-		document.removeEventListener( 'mousemove', mousemove, false );
-		document.removeEventListener( 'mouseup', mouseup, false );
-
-		window.removeEventListener( 'keydown', keydown, false );
-		window.removeEventListener( 'keyup', keyup, false );
-
-	}
-
-	this.domElement.addEventListener( 'contextmenu', contextmenu, false );
-	this.domElement.addEventListener( 'mousedown', mousedown, false );
-	this.domElement.addEventListener( 'mousewheel', mousewheel, false );
-	this.domElement.addEventListener( 'MozMousePixelScroll', mousewheel, false ); // firefox
-
-	this.domElement.addEventListener( 'touchstart', touchstart, false );
-	this.domElement.addEventListener( 'touchend', touchend, false );
-	this.domElement.addEventListener( 'touchmove', touchmove, false );
-
-	window.addEventListener( 'keydown', keydown, false );
-	window.addEventListener( 'keyup', keyup, false );
-
-	this.handleResize();
-
-	// force an update at start
-	this.update();
-
-};
-
-THREE.TrackballControls.prototype = Object.create( THREE.EventDispatcher.prototype );
-THREE.TrackballControls.prototype.constructor = THREE.TrackballControls;
-
-// File:src/extras/helpers/AxisHelper.js
-
-/**
- * @author sroucheray / http://sroucheray.org/
- * @author mrdoob / http://mrdoob.com/
- */
-
-THREE.AxisHelper = function ( size ) {
-
-	size = size || 1;
-
-	var vertices = new Float32Array( [
-		0, 0, 0,  size, 0, 0,
-		0, 0, 0,  0, size, 0,
-		0, 0, 0,  0, 0, size
-	] );
-
-	var colors = new Float32Array( [
-		1, 0, 0,  1, 0.6, 0,
-		0, 1, 0,  0.6, 1, 0,
-		0, 0, 1,  0, 0.6, 1
-	] );
-
-	var geometry = new THREE.BufferGeometry();
-	geometry.addAttribute( 'position', new THREE.BufferAttribute( vertices, 3 ) );
-	geometry.addAttribute( 'color', new THREE.BufferAttribute( colors, 3 ) );
-
-	var material = new THREE.LineBasicMaterial( { vertexColors: THREE.VertexColors } );
-
-	THREE.LineSegments.call( this, geometry, material );
-
-};
-
-THREE.AxisHelper.prototype = Object.create( THREE.LineSegments.prototype );
-THREE.AxisHelper.prototype.constructor = THREE.AxisHelper;
-
 // File:src/Three.js
 
 /**
@@ -15959,6 +14168,80 @@ THREE.DirectionalLight.prototype.copy = function ( source ) {
 
 };
 
+// File:src/lights/HemisphereLight.js
+
+/**
+ * @author alteredq / http://alteredqualia.com/
+ */
+
+THREE.HemisphereLight = function ( skyColor, groundColor, intensity ) {
+
+	THREE.Light.call( this, skyColor );
+
+	this.type = 'HemisphereLight';
+
+	this.castShadow = undefined;
+
+	this.position.set( 0, 1, 0 );
+	this.updateMatrix();
+
+	this.groundColor = new THREE.Color( groundColor );
+	this.intensity = ( intensity !== undefined ) ? intensity : 1;
+
+};
+
+THREE.HemisphereLight.prototype = Object.create( THREE.Light.prototype );
+THREE.HemisphereLight.prototype.constructor = THREE.HemisphereLight;
+
+THREE.HemisphereLight.prototype.copy = function ( source ) {
+
+	THREE.Light.prototype.copy.call( this, source );
+
+	this.groundColor.copy( source.groundColor );
+	this.intensity = source.intensity;
+
+	return this;
+
+};
+
+// File:src/lights/PointLight.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ */
+
+
+THREE.PointLight = function ( color, intensity, distance, decay ) {
+
+	THREE.Light.call( this, color );
+
+	this.type = 'PointLight';
+
+	this.intensity = ( intensity !== undefined ) ? intensity : 1;
+	this.distance = ( distance !== undefined ) ? distance : 0;
+	this.decay = ( decay !== undefined ) ? decay : 1;	// for physically correct lights, should be 2.
+
+	this.shadow = new THREE.LightShadow( new THREE.PerspectiveCamera( 90, 1, 1, 500 ) );
+
+};
+
+THREE.PointLight.prototype = Object.create( THREE.Light.prototype );
+THREE.PointLight.prototype.constructor = THREE.PointLight;
+
+THREE.PointLight.prototype.copy = function ( source ) {
+
+	THREE.Light.prototype.copy.call( this, source );
+
+	this.intensity = source.intensity;
+	this.distance = source.distance;
+	this.decay = source.decay;
+
+	this.shadow = source.shadow.clone();
+
+	return this;
+
+};
+
 // File:src/lights/SpotLight.js
 
 /**
@@ -16453,6 +14736,649 @@ THREE.XHRLoader.prototype = {
 
 };
 
+// File:src/loaders/ImageLoader.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ */
+
+THREE.ImageLoader = function ( manager ) {
+
+	this.manager = ( manager !== undefined ) ? manager : THREE.DefaultLoadingManager;
+
+};
+
+THREE.ImageLoader.prototype = {
+
+	constructor: THREE.ImageLoader,
+
+	load: function ( url, onLoad, onProgress, onError ) {
+
+		var scope = this;
+
+		var cached = THREE.Cache.get( url );
+
+		if ( cached !== undefined ) {
+
+			scope.manager.itemStart( url );
+
+			if ( onLoad ) {
+
+				setTimeout( function () {
+
+					onLoad( cached );
+
+					scope.manager.itemEnd( url );
+
+				}, 0 );
+
+			} else {
+
+				scope.manager.itemEnd( url );
+
+			}
+
+			return cached;
+
+		}
+
+		var image = document.createElement( 'img' );
+
+		image.addEventListener( 'load', function ( event ) {
+
+			THREE.Cache.add( url, this );
+
+			if ( onLoad ) onLoad( this );
+
+			scope.manager.itemEnd( url );
+
+		}, false );
+
+		if ( onProgress !== undefined ) {
+
+			image.addEventListener( 'progress', function ( event ) {
+
+				onProgress( event );
+
+			}, false );
+
+		}
+
+		image.addEventListener( 'error', function ( event ) {
+
+			if ( onError ) onError( event );
+
+			scope.manager.itemError( url );
+
+		}, false );
+
+		if ( this.crossOrigin !== undefined ) image.crossOrigin = this.crossOrigin;
+
+		scope.manager.itemStart( url );
+
+		image.src = url;
+
+		return image;
+
+	},
+
+	setCrossOrigin: function ( value ) {
+
+		this.crossOrigin = value;
+
+	}
+
+};
+
+// File:src/loaders/JSONLoader.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ * @author alteredq / http://alteredqualia.com/
+ */
+
+THREE.JSONLoader = function ( manager ) {
+
+	if ( typeof manager === 'boolean' ) {
+
+		console.warn( 'THREE.JSONLoader: showStatus parameter has been removed from constructor.' );
+		manager = undefined;
+
+	}
+
+	this.manager = ( manager !== undefined ) ? manager : THREE.DefaultLoadingManager;
+
+	this.withCredentials = false;
+
+};
+
+THREE.JSONLoader.prototype = {
+
+	constructor: THREE.JSONLoader,
+
+	// Deprecated
+
+	get statusDomElement () {
+
+		if ( this._statusDomElement === undefined ) {
+
+			this._statusDomElement = document.createElement( 'div' );
+
+		}
+
+		console.warn( 'THREE.JSONLoader: .statusDomElement has been removed.' );
+		return this._statusDomElement;
+
+	},
+
+	load: function( url, onLoad, onProgress, onError ) {
+
+		var scope = this;
+
+		var texturePath = this.texturePath && ( typeof this.texturePath === "string" ) ? this.texturePath : THREE.Loader.prototype.extractUrlBase( url );
+
+		var loader = new THREE.XHRLoader( this.manager );
+		loader.setCrossOrigin( this.crossOrigin );
+		loader.setWithCredentials( this.withCredentials );
+		loader.load( url, function ( text ) {
+
+			var json = JSON.parse( text );
+			var metadata = json.metadata;
+
+			if ( metadata !== undefined ) {
+
+				if ( metadata.type === 'object' ) {
+
+					console.error( 'THREE.JSONLoader: ' + url + ' should be loaded with THREE.ObjectLoader instead.' );
+					return;
+
+				}
+
+				if ( metadata.type === 'scene' ) {
+
+					console.error( 'THREE.JSONLoader: ' + url + ' should be loaded with THREE.SceneLoader instead.' );
+					return;
+
+				}
+
+			}
+
+			var object = scope.parse( json, texturePath );
+			onLoad( object.geometry, object.materials );
+
+		} );
+
+	},
+
+	setCrossOrigin: function ( value ) {
+
+		this.crossOrigin = value;
+
+	},
+
+	setTexturePath: function ( value ) {
+
+		this.texturePath = value;
+
+	},
+
+	parse: function ( json, texturePath ) {
+
+		var geometry = new THREE.Geometry(),
+		scale = ( json.scale !== undefined ) ? 1.0 / json.scale : 1.0;
+
+		parseModel( scale );
+
+		parseSkin();
+		parseMorphing( scale );
+		parseAnimations();
+
+		geometry.computeFaceNormals();
+		geometry.computeBoundingSphere();
+
+		function parseModel( scale ) {
+
+			function isBitSet( value, position ) {
+
+				return value & ( 1 << position );
+
+			}
+
+			var i, j, fi,
+
+			offset, zLength,
+
+		colorIndex, normalIndex, uvIndex, materialIndex,
+
+			type,
+			isQuad,
+			hasMaterial,
+			hasFaceVertexUv,
+			hasFaceNormal, hasFaceVertexNormal,
+			hasFaceColor, hasFaceVertexColor,
+
+		vertex, face, faceA, faceB, hex, normal,
+
+			uvLayer, uv, u, v,
+
+			faces = json.faces,
+			vertices = json.vertices,
+			normals = json.normals,
+			colors = json.colors,
+
+			nUvLayers = 0;
+
+			if ( json.uvs !== undefined ) {
+
+				// disregard empty arrays
+
+				for ( i = 0; i < json.uvs.length; i ++ ) {
+
+					if ( json.uvs[ i ].length ) nUvLayers ++;
+
+				}
+
+				for ( i = 0; i < nUvLayers; i ++ ) {
+
+					geometry.faceVertexUvs[ i ] = [];
+
+				}
+
+			}
+
+			offset = 0;
+			zLength = vertices.length;
+
+			while ( offset < zLength ) {
+
+				vertex = new THREE.Vector3();
+
+				vertex.x = vertices[ offset ++ ] * scale;
+				vertex.y = vertices[ offset ++ ] * scale;
+				vertex.z = vertices[ offset ++ ] * scale;
+
+				geometry.vertices.push( vertex );
+
+			}
+
+			offset = 0;
+			zLength = faces.length;
+
+			while ( offset < zLength ) {
+
+				type = faces[ offset ++ ];
+
+
+				isQuad              = isBitSet( type, 0 );
+				hasMaterial         = isBitSet( type, 1 );
+				hasFaceVertexUv     = isBitSet( type, 3 );
+				hasFaceNormal       = isBitSet( type, 4 );
+				hasFaceVertexNormal = isBitSet( type, 5 );
+				hasFaceColor	     = isBitSet( type, 6 );
+				hasFaceVertexColor  = isBitSet( type, 7 );
+
+				// console.log("type", type, "bits", isQuad, hasMaterial, hasFaceVertexUv, hasFaceNormal, hasFaceVertexNormal, hasFaceColor, hasFaceVertexColor);
+
+				if ( isQuad ) {
+
+					faceA = new THREE.Face3();
+					faceA.a = faces[ offset ];
+					faceA.b = faces[ offset + 1 ];
+					faceA.c = faces[ offset + 3 ];
+
+					faceB = new THREE.Face3();
+					faceB.a = faces[ offset + 1 ];
+					faceB.b = faces[ offset + 2 ];
+					faceB.c = faces[ offset + 3 ];
+
+					offset += 4;
+
+					if ( hasMaterial ) {
+
+						materialIndex = faces[ offset ++ ];
+						faceA.materialIndex = materialIndex;
+						faceB.materialIndex = materialIndex;
+
+					}
+
+					// to get face <=> uv index correspondence
+
+					fi = geometry.faces.length;
+
+					if ( hasFaceVertexUv ) {
+
+						for ( i = 0; i < nUvLayers; i ++ ) {
+
+							uvLayer = json.uvs[ i ];
+
+							geometry.faceVertexUvs[ i ][ fi ] = [];
+							geometry.faceVertexUvs[ i ][ fi + 1 ] = [];
+
+							for ( j = 0; j < 4; j ++ ) {
+
+								uvIndex = faces[ offset ++ ];
+
+								u = uvLayer[ uvIndex * 2 ];
+								v = uvLayer[ uvIndex * 2 + 1 ];
+
+								uv = new THREE.Vector2( u, v );
+
+								if ( j !== 2 ) geometry.faceVertexUvs[ i ][ fi ].push( uv );
+								if ( j !== 0 ) geometry.faceVertexUvs[ i ][ fi + 1 ].push( uv );
+
+							}
+
+						}
+
+					}
+
+					if ( hasFaceNormal ) {
+
+						normalIndex = faces[ offset ++ ] * 3;
+
+						faceA.normal.set(
+							normals[ normalIndex ++ ],
+							normals[ normalIndex ++ ],
+							normals[ normalIndex ]
+						);
+
+						faceB.normal.copy( faceA.normal );
+
+					}
+
+					if ( hasFaceVertexNormal ) {
+
+						for ( i = 0; i < 4; i ++ ) {
+
+							normalIndex = faces[ offset ++ ] * 3;
+
+							normal = new THREE.Vector3(
+								normals[ normalIndex ++ ],
+								normals[ normalIndex ++ ],
+								normals[ normalIndex ]
+							);
+
+
+							if ( i !== 2 ) faceA.vertexNormals.push( normal );
+							if ( i !== 0 ) faceB.vertexNormals.push( normal );
+
+						}
+
+					}
+
+
+					if ( hasFaceColor ) {
+
+						colorIndex = faces[ offset ++ ];
+						hex = colors[ colorIndex ];
+
+						faceA.color.setHex( hex );
+						faceB.color.setHex( hex );
+
+					}
+
+
+					if ( hasFaceVertexColor ) {
+
+						for ( i = 0; i < 4; i ++ ) {
+
+							colorIndex = faces[ offset ++ ];
+							hex = colors[ colorIndex ];
+
+							if ( i !== 2 ) faceA.vertexColors.push( new THREE.Color( hex ) );
+							if ( i !== 0 ) faceB.vertexColors.push( new THREE.Color( hex ) );
+
+						}
+
+					}
+
+					geometry.faces.push( faceA );
+					geometry.faces.push( faceB );
+
+				} else {
+
+					face = new THREE.Face3();
+					face.a = faces[ offset ++ ];
+					face.b = faces[ offset ++ ];
+					face.c = faces[ offset ++ ];
+
+					if ( hasMaterial ) {
+
+						materialIndex = faces[ offset ++ ];
+						face.materialIndex = materialIndex;
+
+					}
+
+					// to get face <=> uv index correspondence
+
+					fi = geometry.faces.length;
+
+					if ( hasFaceVertexUv ) {
+
+						for ( i = 0; i < nUvLayers; i ++ ) {
+
+							uvLayer = json.uvs[ i ];
+
+							geometry.faceVertexUvs[ i ][ fi ] = [];
+
+							for ( j = 0; j < 3; j ++ ) {
+
+								uvIndex = faces[ offset ++ ];
+
+								u = uvLayer[ uvIndex * 2 ];
+								v = uvLayer[ uvIndex * 2 + 1 ];
+
+								uv = new THREE.Vector2( u, v );
+
+								geometry.faceVertexUvs[ i ][ fi ].push( uv );
+
+							}
+
+						}
+
+					}
+
+					if ( hasFaceNormal ) {
+
+						normalIndex = faces[ offset ++ ] * 3;
+
+						face.normal.set(
+							normals[ normalIndex ++ ],
+							normals[ normalIndex ++ ],
+							normals[ normalIndex ]
+						);
+
+					}
+
+					if ( hasFaceVertexNormal ) {
+
+						for ( i = 0; i < 3; i ++ ) {
+
+							normalIndex = faces[ offset ++ ] * 3;
+
+							normal = new THREE.Vector3(
+								normals[ normalIndex ++ ],
+								normals[ normalIndex ++ ],
+								normals[ normalIndex ]
+							);
+
+							face.vertexNormals.push( normal );
+
+						}
+
+					}
+
+
+					if ( hasFaceColor ) {
+
+						colorIndex = faces[ offset ++ ];
+						face.color.setHex( colors[ colorIndex ] );
+
+					}
+
+
+					if ( hasFaceVertexColor ) {
+
+						for ( i = 0; i < 3; i ++ ) {
+
+							colorIndex = faces[ offset ++ ];
+							face.vertexColors.push( new THREE.Color( colors[ colorIndex ] ) );
+
+						}
+
+					}
+
+					geometry.faces.push( face );
+
+				}
+
+			}
+
+		};
+
+		function parseSkin() {
+
+			var influencesPerVertex = ( json.influencesPerVertex !== undefined ) ? json.influencesPerVertex : 2;
+
+			if ( json.skinWeights ) {
+
+				for ( var i = 0, l = json.skinWeights.length; i < l; i += influencesPerVertex ) {
+
+					var x =                               json.skinWeights[ i ];
+					var y = ( influencesPerVertex > 1 ) ? json.skinWeights[ i + 1 ] : 0;
+					var z = ( influencesPerVertex > 2 ) ? json.skinWeights[ i + 2 ] : 0;
+					var w = ( influencesPerVertex > 3 ) ? json.skinWeights[ i + 3 ] : 0;
+
+					geometry.skinWeights.push( new THREE.Vector4( x, y, z, w ) );
+
+				}
+
+			}
+
+			if ( json.skinIndices ) {
+
+				for ( var i = 0, l = json.skinIndices.length; i < l; i += influencesPerVertex ) {
+
+					var a =                               json.skinIndices[ i ];
+					var b = ( influencesPerVertex > 1 ) ? json.skinIndices[ i + 1 ] : 0;
+					var c = ( influencesPerVertex > 2 ) ? json.skinIndices[ i + 2 ] : 0;
+					var d = ( influencesPerVertex > 3 ) ? json.skinIndices[ i + 3 ] : 0;
+
+					geometry.skinIndices.push( new THREE.Vector4( a, b, c, d ) );
+
+				}
+
+			}
+
+			geometry.bones = json.bones;
+
+			if ( geometry.bones && geometry.bones.length > 0 && ( geometry.skinWeights.length !== geometry.skinIndices.length || geometry.skinIndices.length !== geometry.vertices.length ) ) {
+
+				console.warn( 'When skinning, number of vertices (' + geometry.vertices.length + '), skinIndices (' +
+					geometry.skinIndices.length + '), and skinWeights (' + geometry.skinWeights.length + ') should match.' );
+
+			}
+
+		};
+
+		function parseMorphing( scale ) {
+
+			if ( json.morphTargets !== undefined ) {
+
+				for ( var i = 0, l = json.morphTargets.length; i < l; i ++ ) {
+
+					geometry.morphTargets[ i ] = {};
+					geometry.morphTargets[ i ].name = json.morphTargets[ i ].name;
+					geometry.morphTargets[ i ].vertices = [];
+
+					var dstVertices = geometry.morphTargets[ i ].vertices;
+					var srcVertices = json.morphTargets[ i ].vertices;
+
+					for ( var v = 0, vl = srcVertices.length; v < vl; v += 3 ) {
+
+						var vertex = new THREE.Vector3();
+						vertex.x = srcVertices[ v ] * scale;
+						vertex.y = srcVertices[ v + 1 ] * scale;
+						vertex.z = srcVertices[ v + 2 ] * scale;
+
+						dstVertices.push( vertex );
+
+					}
+
+				}
+
+			}
+
+			if ( json.morphColors !== undefined && json.morphColors.length > 0 ) {
+
+				console.warn( 'THREE.JSONLoader: "morphColors" no longer supported. Using them as face colors.' );
+
+				var faces = geometry.faces;
+				var morphColors = json.morphColors[ 0 ].colors;
+
+				for ( var i = 0, l = faces.length; i < l; i ++ ) {
+
+					faces[ i ].color.fromArray( morphColors, i * 3 );
+
+				}
+
+			}
+
+		}
+
+		function parseAnimations() {
+
+			var outputAnimations = [];
+
+			// parse old style Bone/Hierarchy animations
+			var animations = [];
+			if ( json.animation !== undefined ) {
+				animations.push( json.animation );
+			}
+			if ( json.animations !== undefined ) {
+				if ( json.animations.length ) {
+					animations = animations.concat( json.animations );
+				} else {
+					animations.push( json.animations );
+				}
+			}
+
+			for ( var i = 0; i < animations.length; i ++ ) {
+
+				var clip = THREE.AnimationClip.parseAnimation( animations[i], geometry.bones );
+				if ( clip ) outputAnimations.push( clip );
+
+			}
+
+			// parse implicit morph animations
+			if ( geometry.morphTargets ) {
+
+				// TODO: Figure out what an appropraite FPS is for morph target animations -- defaulting to 10, but really it is completely arbitrary.
+				var morphAnimationClips = THREE.AnimationClip.CreateClipsFromMorphTargetSequences( geometry.morphTargets, 10 );
+				outputAnimations = outputAnimations.concat( morphAnimationClips );
+
+			}
+
+			if ( outputAnimations.length > 0 ) geometry.animations = outputAnimations;
+
+		};
+
+		if ( json.materials === undefined || json.materials.length === 0 ) {
+
+			return { geometry: geometry };
+
+		} else {
+
+			var materials = THREE.Loader.prototype.initMaterials( json.materials, texturePath, this.crossOrigin );
+
+			return { geometry: geometry, materials: materials };
+
+		}
+
+	}
+
+};
+
 // File:src/loaders/LoadingManager.js
 
 /**
@@ -16617,6 +15543,1115 @@ THREE.BufferGeometryLoader.prototype = {
 		}
 
 		return geometry;
+
+	}
+
+};
+
+// File:src/loaders/MaterialLoader.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ */
+
+THREE.MaterialLoader = function ( manager ) {
+
+	this.manager = ( manager !== undefined ) ? manager : THREE.DefaultLoadingManager;
+	this.textures = {};
+
+};
+
+THREE.MaterialLoader.prototype = {
+
+	constructor: THREE.MaterialLoader,
+
+	load: function ( url, onLoad, onProgress, onError ) {
+
+		var scope = this;
+
+		var loader = new THREE.XHRLoader( scope.manager );
+		loader.setCrossOrigin( this.crossOrigin );
+		loader.load( url, function ( text ) {
+
+			onLoad( scope.parse( JSON.parse( text ) ) );
+
+		}, onProgress, onError );
+
+	},
+
+	setCrossOrigin: function ( value ) {
+
+		this.crossOrigin = value;
+
+	},
+
+	setTextures: function ( value ) {
+
+		this.textures = value;
+
+	},
+
+	getTexture: function ( name ) {
+
+		var textures = this.textures;
+
+		if ( textures[ name ] === undefined ) {
+
+			console.warn( 'THREE.MaterialLoader: Undefined texture', name );
+
+		}
+
+		return textures[ name ];
+
+	},
+
+	parse: function ( json ) {
+
+		var material = new THREE[ json.type ];
+		material.uuid = json.uuid;
+
+		if ( json.name !== undefined ) material.name = json.name;
+		if ( json.color !== undefined ) material.color.setHex( json.color );
+		if ( json.emissive !== undefined ) material.emissive.setHex( json.emissive );
+		if ( json.specular !== undefined ) material.specular.setHex( json.specular );
+		if ( json.shininess !== undefined ) material.shininess = json.shininess;
+		if ( json.uniforms !== undefined ) material.uniforms = json.uniforms;
+		if ( json.vertexShader !== undefined ) material.vertexShader = json.vertexShader;
+		if ( json.fragmentShader !== undefined ) material.fragmentShader = json.fragmentShader;
+		if ( json.vertexColors !== undefined ) material.vertexColors = json.vertexColors;
+		if ( json.shading !== undefined ) material.shading = json.shading;
+		if ( json.blending !== undefined ) material.blending = json.blending;
+		if ( json.side !== undefined ) material.side = json.side;
+		if ( json.opacity !== undefined ) material.opacity = json.opacity;
+		if ( json.transparent !== undefined ) material.transparent = json.transparent;
+		if ( json.alphaTest !== undefined ) material.alphaTest = json.alphaTest;
+		if ( json.depthTest !== undefined ) material.depthTest = json.depthTest;
+		if ( json.depthWrite !== undefined ) material.depthWrite = json.depthWrite;
+		if ( json.wireframe !== undefined ) material.wireframe = json.wireframe;
+		if ( json.wireframeLinewidth !== undefined ) material.wireframeLinewidth = json.wireframeLinewidth;
+
+		// for PointsMaterial
+		if ( json.size !== undefined ) material.size = json.size;
+		if ( json.sizeAttenuation !== undefined ) material.sizeAttenuation = json.sizeAttenuation;
+
+		// maps
+
+		if ( json.map !== undefined ) material.map = this.getTexture( json.map );
+
+		if ( json.alphaMap !== undefined ) {
+
+			material.alphaMap = this.getTexture( json.alphaMap );
+			material.transparent = true;
+
+		}
+
+		if ( json.bumpMap !== undefined ) material.bumpMap = this.getTexture( json.bumpMap );
+		if ( json.bumpScale !== undefined ) material.bumpScale = json.bumpScale;
+
+		if ( json.normalMap !== undefined ) material.normalMap = this.getTexture( json.normalMap );
+		if ( json.normalScale )	material.normalScale = new THREE.Vector2( json.normalScale, json.normalScale );
+
+		if ( json.displacementMap !== undefined ) material.displacementMap = this.getTexture( json.displacementMap );
+		if ( json.displacementScale !== undefined ) material.displacementScale = json.displacementScale;
+		if ( json.displacementBias !== undefined ) material.displacementBias = json.displacementBias;
+
+		if ( json.specularMap !== undefined ) material.specularMap = this.getTexture( json.specularMap );
+
+		if ( json.envMap !== undefined ) {
+
+			material.envMap = this.getTexture( json.envMap );
+			material.combine = THREE.MultiplyOperation;
+
+		}
+
+		if ( json.reflectivity ) material.reflectivity = json.reflectivity;
+
+		if ( json.lightMap !== undefined ) material.lightMap = this.getTexture( json.lightMap );
+		if ( json.lightMapIntensity !== undefined ) material.lightMapIntensity = json.lightMapIntensity;
+
+		if ( json.aoMap !== undefined ) material.aoMap = this.getTexture( json.aoMap );
+		if ( json.aoMapIntensity !== undefined ) material.aoMapIntensity = json.aoMapIntensity;
+
+		// MeshFaceMaterial
+
+		if ( json.materials !== undefined ) {
+
+			for ( var i = 0, l = json.materials.length; i < l; i ++ ) {
+
+				material.materials.push( this.parse( json.materials[ i ] ) );
+
+			}
+
+		}
+
+		return material;
+
+	}
+
+};
+
+// File:src/loaders/ObjectLoader.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ */
+
+THREE.ObjectLoader = function ( manager ) {
+
+	this.manager = ( manager !== undefined ) ? manager : THREE.DefaultLoadingManager;
+	this.texturePath = '';
+
+};
+
+THREE.ObjectLoader.prototype = {
+
+	constructor: THREE.ObjectLoader,
+
+	load: function ( url, onLoad, onProgress, onError ) {
+
+		if ( this.texturePath === '' ) {
+
+			this.texturePath = url.substring( 0, url.lastIndexOf( '/' ) + 1 );
+
+		}
+
+		var scope = this;
+
+		var loader = new THREE.XHRLoader( scope.manager );
+		loader.setCrossOrigin( this.crossOrigin );
+		loader.load( url, function ( text ) {
+
+			scope.parse( JSON.parse( text ), onLoad );
+
+		}, onProgress, onError );
+
+	},
+
+	setTexturePath: function ( value ) {
+
+		this.texturePath = value;
+
+	},
+
+	setCrossOrigin: function ( value ) {
+
+		this.crossOrigin = value;
+
+	},
+
+	parse: function ( json, onLoad ) {
+
+		var geometries = this.parseGeometries( json.geometries );
+
+		var images = this.parseImages( json.images, function () {
+
+			if ( onLoad !== undefined ) onLoad( object );
+
+		} );
+
+		var textures  = this.parseTextures( json.textures, images );
+		var materials = this.parseMaterials( json.materials, textures );
+
+		var object = this.parseObject( json.object, geometries, materials );
+
+		if ( json.animations ) {
+
+			object.animations = this.parseAnimations( json.animations );
+
+		}
+
+		if ( json.images === undefined || json.images.length === 0 ) {
+
+			if ( onLoad !== undefined ) onLoad( object );
+
+		}
+
+		return object;
+
+	},
+
+	parseGeometries: function ( json ) {
+
+		var geometries = {};
+
+		if ( json !== undefined ) {
+
+			var geometryLoader = new THREE.JSONLoader();
+			var bufferGeometryLoader = new THREE.BufferGeometryLoader();
+
+			for ( var i = 0, l = json.length; i < l; i ++ ) {
+
+				var geometry;
+				var data = json[ i ];
+
+				switch ( data.type ) {
+
+					case 'PlaneGeometry':
+					case 'PlaneBufferGeometry':
+
+						geometry = new THREE[ data.type ](
+							data.width,
+							data.height,
+							data.widthSegments,
+							data.heightSegments
+						);
+
+						break;
+
+					case 'BoxGeometry':
+					case 'CubeGeometry': // backwards compatible
+
+						geometry = new THREE.BoxGeometry(
+							data.width,
+							data.height,
+							data.depth,
+							data.widthSegments,
+							data.heightSegments,
+							data.depthSegments
+						);
+
+						break;
+
+					case 'CircleBufferGeometry':
+
+						geometry = new THREE.CircleBufferGeometry(
+							data.radius,
+							data.segments,
+							data.thetaStart,
+							data.thetaLength
+						);
+
+						break;
+
+					case 'CircleGeometry':
+
+						geometry = new THREE.CircleGeometry(
+							data.radius,
+							data.segments,
+							data.thetaStart,
+							data.thetaLength
+						);
+
+						break;
+
+					case 'CylinderGeometry':
+
+						geometry = new THREE.CylinderGeometry(
+							data.radiusTop,
+							data.radiusBottom,
+							data.height,
+							data.radialSegments,
+							data.heightSegments,
+							data.openEnded,
+							data.thetaStart,
+							data.thetaLength
+						);
+
+						break;
+
+					case 'SphereGeometry':
+
+						geometry = new THREE.SphereGeometry(
+							data.radius,
+							data.widthSegments,
+							data.heightSegments,
+							data.phiStart,
+							data.phiLength,
+							data.thetaStart,
+							data.thetaLength
+						);
+
+						break;
+
+					case 'SphereBufferGeometry':
+
+						geometry = new THREE.SphereBufferGeometry(
+							data.radius,
+							data.widthSegments,
+							data.heightSegments,
+							data.phiStart,
+							data.phiLength,
+							data.thetaStart,
+							data.thetaLength
+						);
+
+						break;
+
+					case 'DodecahedronGeometry':
+
+						geometry = new THREE.DodecahedronGeometry(
+							data.radius,
+							data.detail
+						);
+
+						break;
+
+					case 'IcosahedronGeometry':
+
+						geometry = new THREE.IcosahedronGeometry(
+							data.radius,
+							data.detail
+						);
+
+						break;
+
+					case 'OctahedronGeometry':
+
+						geometry = new THREE.OctahedronGeometry(
+							data.radius,
+							data.detail
+						);
+
+						break;
+
+					case 'TetrahedronGeometry':
+
+						geometry = new THREE.TetrahedronGeometry(
+							data.radius,
+							data.detail
+						);
+
+						break;
+
+					case 'RingGeometry':
+
+						geometry = new THREE.RingGeometry(
+							data.innerRadius,
+							data.outerRadius,
+							data.thetaSegments,
+							data.phiSegments,
+							data.thetaStart,
+							data.thetaLength
+						);
+
+						break;
+
+					case 'TorusGeometry':
+
+						geometry = new THREE.TorusGeometry(
+							data.radius,
+							data.tube,
+							data.radialSegments,
+							data.tubularSegments,
+							data.arc
+						);
+
+						break;
+
+					case 'TorusKnotGeometry':
+
+						geometry = new THREE.TorusKnotGeometry(
+							data.radius,
+							data.tube,
+							data.radialSegments,
+							data.tubularSegments,
+							data.p,
+							data.q,
+							data.heightScale
+						);
+
+						break;
+
+					case 'BufferGeometry':
+
+						geometry = bufferGeometryLoader.parse( data );
+
+						break;
+
+					case 'Geometry':
+
+						geometry = geometryLoader.parse( data.data, this.texturePath ).geometry;
+
+						break;
+
+					default:
+
+						console.warn( 'THREE.ObjectLoader: Unsupported geometry type "' + data.type + '"' );
+
+						continue;
+
+				}
+
+				geometry.uuid = data.uuid;
+
+				if ( data.name !== undefined ) geometry.name = data.name;
+
+				geometries[ data.uuid ] = geometry;
+
+			}
+
+		}
+
+		return geometries;
+
+	},
+
+	parseMaterials: function ( json, textures ) {
+
+		var materials = {};
+
+		if ( json !== undefined ) {
+
+			var loader = new THREE.MaterialLoader();
+			loader.setTextures( textures );
+
+			for ( var i = 0, l = json.length; i < l; i ++ ) {
+
+				var material = loader.parse( json[ i ] );
+				materials[ material.uuid ] = material;
+
+			}
+
+		}
+
+		return materials;
+
+	},
+
+	parseAnimations: function ( json ) {
+
+		var animations = [];
+
+		for ( var i = 0; i < json.length; i ++ ) {
+
+			var clip = THREE.AnimationClip.parse( json[i] );
+
+			animations.push( clip );
+
+		}
+
+		return animations;
+
+	},
+
+	parseImages: function ( json, onLoad ) {
+
+		var scope = this;
+		var images = {};
+
+		function loadImage( url ) {
+
+			scope.manager.itemStart( url );
+
+			return loader.load( url, function () {
+
+				scope.manager.itemEnd( url );
+
+			} );
+
+		}
+
+		if ( json !== undefined && json.length > 0 ) {
+
+			var manager = new THREE.LoadingManager( onLoad );
+
+			var loader = new THREE.ImageLoader( manager );
+			loader.setCrossOrigin( this.crossOrigin );
+
+			for ( var i = 0, l = json.length; i < l; i ++ ) {
+
+				var image = json[ i ];
+				var path = /^(\/\/)|([a-z]+:(\/\/)?)/i.test( image.url ) ? image.url : scope.texturePath + image.url;
+
+				images[ image.uuid ] = loadImage( path );
+
+			}
+
+		}
+
+		return images;
+
+	},
+
+	parseTextures: function ( json, images ) {
+
+		function parseConstant( value ) {
+
+			if ( typeof( value ) === 'number' ) return value;
+
+			console.warn( 'THREE.ObjectLoader.parseTexture: Constant should be in numeric form.', value );
+
+			return THREE[ value ];
+
+		}
+
+		var textures = {};
+
+		if ( json !== undefined ) {
+
+			for ( var i = 0, l = json.length; i < l; i ++ ) {
+
+				var data = json[ i ];
+
+				if ( data.image === undefined ) {
+
+					console.warn( 'THREE.ObjectLoader: No "image" specified for', data.uuid );
+
+				}
+
+				if ( images[ data.image ] === undefined ) {
+
+					console.warn( 'THREE.ObjectLoader: Undefined image', data.image );
+
+				}
+
+				var texture = new THREE.Texture( images[ data.image ] );
+				texture.needsUpdate = true;
+
+				texture.uuid = data.uuid;
+
+				if ( data.name !== undefined ) texture.name = data.name;
+				if ( data.mapping !== undefined ) texture.mapping = parseConstant( data.mapping );
+				if ( data.offset !== undefined ) texture.offset = new THREE.Vector2( data.offset[ 0 ], data.offset[ 1 ] );
+				if ( data.repeat !== undefined ) texture.repeat = new THREE.Vector2( data.repeat[ 0 ], data.repeat[ 1 ] );
+				if ( data.minFilter !== undefined ) texture.minFilter = parseConstant( data.minFilter );
+				if ( data.magFilter !== undefined ) texture.magFilter = parseConstant( data.magFilter );
+				if ( data.anisotropy !== undefined ) texture.anisotropy = data.anisotropy;
+				if ( Array.isArray( data.wrap ) ) {
+
+					texture.wrapS = parseConstant( data.wrap[ 0 ] );
+					texture.wrapT = parseConstant( data.wrap[ 1 ] );
+
+				}
+
+				textures[ data.uuid ] = texture;
+
+			}
+
+		}
+
+		return textures;
+
+	},
+
+	parseObject: function () {
+
+		var matrix = new THREE.Matrix4();
+
+		return function ( data, geometries, materials ) {
+
+			var object;
+
+			function getGeometry( name ) {
+
+				if ( geometries[ name ] === undefined ) {
+
+					console.warn( 'THREE.ObjectLoader: Undefined geometry', name );
+
+				}
+
+				return geometries[ name ];
+
+			}
+
+			function getMaterial( name ) {
+
+				if ( name === undefined ) return undefined;
+
+				if ( materials[ name ] === undefined ) {
+
+					console.warn( 'THREE.ObjectLoader: Undefined material', name );
+
+				}
+
+				return materials[ name ];
+
+			}
+
+			switch ( data.type ) {
+
+				case 'Scene':
+
+					object = new THREE.Scene();
+
+					break;
+
+				case 'PerspectiveCamera':
+
+					object = new THREE.PerspectiveCamera( data.fov, data.aspect, data.near, data.far );
+
+					break;
+
+				case 'OrthographicCamera':
+
+					object = new THREE.OrthographicCamera( data.left, data.right, data.top, data.bottom, data.near, data.far );
+
+					break;
+
+				case 'AmbientLight':
+
+					object = new THREE.AmbientLight( data.color );
+
+					break;
+
+				case 'DirectionalLight':
+
+					object = new THREE.DirectionalLight( data.color, data.intensity );
+
+					break;
+
+				case 'PointLight':
+
+					object = new THREE.PointLight( data.color, data.intensity, data.distance, data.decay );
+
+					break;
+
+				case 'SpotLight':
+
+					object = new THREE.SpotLight( data.color, data.intensity, data.distance, data.angle, data.exponent, data.decay );
+
+					break;
+
+				case 'HemisphereLight':
+
+					object = new THREE.HemisphereLight( data.color, data.groundColor, data.intensity );
+
+					break;
+
+				case 'Mesh':
+
+					object = new THREE.Mesh( getGeometry( data.geometry ), getMaterial( data.material ) );
+
+					break;
+
+				case 'LOD':
+
+					object = new THREE.LOD();
+
+					break;
+
+				case 'Line':
+
+					object = new THREE.Line( getGeometry( data.geometry ), getMaterial( data.material ), data.mode );
+
+					break;
+
+				case 'PointCloud':
+				case 'Points':
+
+					object = new THREE.Points( getGeometry( data.geometry ), getMaterial( data.material ) );
+
+					break;
+
+				case 'Sprite':
+
+					object = new THREE.Sprite( getMaterial( data.material ) );
+
+					break;
+
+				case 'Group':
+
+					object = new THREE.Group();
+
+					break;
+
+				default:
+
+					object = new THREE.Object3D();
+
+			}
+
+			object.uuid = data.uuid;
+
+			if ( data.name !== undefined ) object.name = data.name;
+			if ( data.matrix !== undefined ) {
+
+				matrix.fromArray( data.matrix );
+				matrix.decompose( object.position, object.quaternion, object.scale );
+
+			} else {
+
+				if ( data.position !== undefined ) object.position.fromArray( data.position );
+				if ( data.rotation !== undefined ) object.rotation.fromArray( data.rotation );
+				if ( data.scale !== undefined ) object.scale.fromArray( data.scale );
+
+			}
+
+			if ( data.castShadow !== undefined ) object.castShadow = data.castShadow;
+			if ( data.receiveShadow !== undefined ) object.receiveShadow = data.receiveShadow;
+
+			if ( data.visible !== undefined ) object.visible = data.visible;
+			if ( data.userData !== undefined ) object.userData = data.userData;
+
+			if ( data.children !== undefined ) {
+
+				for ( var child in data.children ) {
+
+					object.add( this.parseObject( data.children[ child ], geometries, materials ) );
+
+				}
+
+			}
+
+			if ( data.type === 'LOD' ) {
+
+				var levels = data.levels;
+
+				for ( var l = 0; l < levels.length; l ++ ) {
+
+					var level = levels[ l ];
+					var child = object.getObjectByProperty( 'uuid', level.object );
+
+					if ( child !== undefined ) {
+
+						object.addLevel( child, level.distance );
+
+					}
+
+				}
+
+			}
+
+			return object;
+
+		}
+
+	}()
+
+};
+
+// File:src/loaders/TextureLoader.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ */
+
+THREE.TextureLoader = function ( manager ) {
+
+	this.manager = ( manager !== undefined ) ? manager : THREE.DefaultLoadingManager;
+
+};
+
+THREE.TextureLoader.prototype = {
+
+	constructor: THREE.TextureLoader,
+
+	load: function ( url, onLoad, onProgress, onError ) {
+
+		var texture = new THREE.Texture();
+
+		var loader = new THREE.ImageLoader( this.manager );
+		loader.setCrossOrigin( this.crossOrigin );
+		loader.load( url, function ( image ) {
+
+			texture.image = image;
+			texture.needsUpdate = true;
+
+			if ( onLoad !== undefined ) {
+
+				onLoad( texture );
+
+			}
+
+		}, onProgress, onError );
+
+		return texture;
+
+	},
+
+	setCrossOrigin: function ( value ) {
+
+		this.crossOrigin = value;
+
+	}
+
+};
+
+// File:src/loaders/CubeTextureLoader.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ */
+
+THREE.CubeTextureLoader = function ( manager ) {
+
+	this.manager = ( manager !== undefined ) ? manager : THREE.DefaultLoadingManager;
+
+};
+
+THREE.CubeTextureLoader.prototype = {
+
+	constructor: THREE.CubeTextureLoader,
+
+	load: function ( urls, onLoad, onProgress, onError ) {
+
+		var texture = new THREE.CubeTexture( [] );
+
+		var loader = new THREE.ImageLoader();
+		loader.setCrossOrigin( this.crossOrigin );
+
+		var loaded = 0;
+
+		function loadTexture( i ) {
+
+			loader.load( urls[ i ], function ( image ) {
+
+				texture.images[ i ] = image;
+
+				loaded ++;
+
+				if ( loaded === 6 ) {
+
+					texture.needsUpdate = true;
+
+					if ( onLoad ) onLoad( texture );
+
+				}
+
+			}, undefined, onError );
+
+		}
+
+		for ( var i = 0; i < urls.length; ++ i ) {
+
+			loadTexture( i );
+
+		}
+
+		return texture;
+
+	},
+
+	setCrossOrigin: function ( value ) {
+
+		this.crossOrigin = value;
+
+	}
+
+};
+
+// File:src/loaders/BinaryTextureLoader.js
+
+/**
+ * @author Nikos M. / https://github.com/foo123/
+ *
+ * Abstract Base class to load generic binary textures formats (rgbe, hdr, ...)
+ */
+
+THREE.DataTextureLoader = THREE.BinaryTextureLoader = function ( manager ) {
+
+	this.manager = ( manager !== undefined ) ? manager : THREE.DefaultLoadingManager;
+
+	// override in sub classes
+	this._parser = null;
+
+};
+
+THREE.BinaryTextureLoader.prototype = {
+
+	constructor: THREE.BinaryTextureLoader,
+
+	load: function ( url, onLoad, onProgress, onError ) {
+
+		var scope = this;
+
+		var texture = new THREE.DataTexture();
+
+		var loader = new THREE.XHRLoader( this.manager );
+		loader.setCrossOrigin( this.crossOrigin );
+		loader.setResponseType( 'arraybuffer' );
+
+		loader.load( url, function ( buffer ) {
+
+			var texData = scope._parser( buffer );
+
+			if ( ! texData ) return;
+
+			if ( undefined !== texData.image ) {
+
+				texture.image = texData.image;
+
+			} else if ( undefined !== texData.data ) {
+
+				texture.image.width = texData.width;
+				texture.image.height = texData.height;
+				texture.image.data = texData.data;
+
+			}
+
+			texture.wrapS = undefined !== texData.wrapS ? texData.wrapS : THREE.ClampToEdgeWrapping;
+			texture.wrapT = undefined !== texData.wrapT ? texData.wrapT : THREE.ClampToEdgeWrapping;
+
+			texture.magFilter = undefined !== texData.magFilter ? texData.magFilter : THREE.LinearFilter;
+			texture.minFilter = undefined !== texData.minFilter ? texData.minFilter : THREE.LinearMipMapLinearFilter;
+
+			texture.anisotropy = undefined !== texData.anisotropy ? texData.anisotropy : 1;
+
+			if ( undefined !== texData.format ) {
+
+				texture.format = texData.format;
+
+			}
+			if ( undefined !== texData.type ) {
+
+				texture.type = texData.type;
+
+			}
+
+			if ( undefined !== texData.mipmaps ) {
+
+				texture.mipmaps = texData.mipmaps;
+
+			}
+
+			if ( 1 === texData.mipmapCount ) {
+
+				texture.minFilter = THREE.LinearFilter;
+
+			}
+
+			texture.needsUpdate = true;
+
+			if ( onLoad ) onLoad( texture, texData );
+
+		}, onProgress, onError );
+
+
+		return texture;
+
+	},
+
+	setCrossOrigin: function ( value ) {
+
+		this.crossOrigin = value;
+
+	}
+
+};
+
+// File:src/loaders/CompressedTextureLoader.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ *
+ * Abstract Base class to block based textures loader (dds, pvr, ...)
+ */
+
+THREE.CompressedTextureLoader = function ( manager ) {
+
+	this.manager = ( manager !== undefined ) ? manager : THREE.DefaultLoadingManager;
+
+	// override in sub classes
+	this._parser = null;
+
+};
+
+
+THREE.CompressedTextureLoader.prototype = {
+
+	constructor: THREE.CompressedTextureLoader,
+
+	load: function ( url, onLoad, onProgress, onError ) {
+
+		var scope = this;
+
+		var images = [];
+
+		var texture = new THREE.CompressedTexture();
+		texture.image = images;
+
+		var loader = new THREE.XHRLoader( this.manager );
+		loader.setCrossOrigin( this.crossOrigin );
+		loader.setResponseType( 'arraybuffer' );
+
+		if ( Array.isArray( url ) ) {
+
+			var loaded = 0;
+
+			var loadTexture = function ( i ) {
+
+				loader.load( url[ i ], function ( buffer ) {
+
+					var texDatas = scope._parser( buffer, true );
+
+					images[ i ] = {
+						width: texDatas.width,
+						height: texDatas.height,
+						format: texDatas.format,
+						mipmaps: texDatas.mipmaps
+					};
+
+					loaded += 1;
+
+					if ( loaded === 6 ) {
+
+						if ( texDatas.mipmapCount === 1 )
+ 							texture.minFilter = THREE.LinearFilter;
+
+						texture.format = texDatas.format;
+						texture.needsUpdate = true;
+
+						if ( onLoad ) onLoad( texture );
+
+					}
+
+				}, onProgress, onError );
+
+			};
+
+			for ( var i = 0, il = url.length; i < il; ++ i ) {
+
+				loadTexture( i );
+
+			}
+
+		} else {
+
+			// compressed cubemap texture stored in a single DDS file
+
+			loader.load( url, function ( buffer ) {
+
+				var texDatas = scope._parser( buffer, true );
+
+				if ( texDatas.isCubemap ) {
+
+					var faces = texDatas.mipmaps.length / texDatas.mipmapCount;
+
+					for ( var f = 0; f < faces; f ++ ) {
+
+						images[ f ] = { mipmaps : [] };
+
+						for ( var i = 0; i < texDatas.mipmapCount; i ++ ) {
+
+							images[ f ].mipmaps.push( texDatas.mipmaps[ f * texDatas.mipmapCount + i ] );
+							images[ f ].format = texDatas.format;
+							images[ f ].width = texDatas.width;
+							images[ f ].height = texDatas.height;
+
+						}
+
+					}
+
+				} else {
+
+					texture.image.width = texDatas.width;
+					texture.image.height = texDatas.height;
+					texture.mipmaps = texDatas.mipmaps;
+
+				}
+
+				if ( texDatas.mipmapCount === 1 ) {
+
+					texture.minFilter = THREE.LinearFilter;
+
+				}
+
+				texture.format = texDatas.format;
+				texture.needsUpdate = true;
+
+				if ( onLoad ) onLoad( texture );
+
+			}, onProgress, onError );
+
+		}
+
+		return texture;
+
+	},
+
+	setCrossOrigin: function ( value ) {
+
+		this.crossOrigin = value;
 
 	}
 
@@ -16955,6 +16990,76 @@ THREE.LineBasicMaterial.prototype.copy = function ( source ) {
 
 };
 
+// File:src/materials/LineDashedMaterial.js
+
+/**
+ * @author alteredq / http://alteredqualia.com/
+ *
+ * parameters = {
+ *  color: <hex>,
+ *  opacity: <float>,
+ *
+ *  blending: THREE.NormalBlending,
+ *  depthTest: <bool>,
+ *  depthWrite: <bool>,
+ *
+ *  linewidth: <float>,
+ *
+ *  scale: <float>,
+ *  dashSize: <float>,
+ *  gapSize: <float>,
+ *
+ *  vertexColors: <bool>
+ *
+ *  fog: <bool>
+ * }
+ */
+
+THREE.LineDashedMaterial = function ( parameters ) {
+
+	THREE.Material.call( this );
+
+	this.type = 'LineDashedMaterial';
+
+	this.color = new THREE.Color( 0xffffff );
+
+	this.linewidth = 1;
+
+	this.scale = 1;
+	this.dashSize = 3;
+	this.gapSize = 1;
+
+	this.vertexColors = false;
+
+	this.fog = true;
+
+	this.setValues( parameters );
+
+};
+
+THREE.LineDashedMaterial.prototype = Object.create( THREE.Material.prototype );
+THREE.LineDashedMaterial.prototype.constructor = THREE.LineDashedMaterial;
+
+THREE.LineDashedMaterial.prototype.copy = function ( source ) {
+
+	THREE.Material.prototype.copy.call( this, source );
+
+	this.color.copy( source.color );
+	
+	this.linewidth = source.linewidth;
+
+	this.scale = source.scale;
+	this.dashSize = source.dashSize;
+	this.gapSize = source.gapSize;
+
+	this.vertexColors = source.vertexColors;
+
+	this.fog = source.fog;
+
+	return this;
+
+};
+
 // File:src/materials/MeshBasicMaterial.js
 
 /**
@@ -17190,6 +17295,351 @@ THREE.MeshLambertMaterial.prototype.copy = function ( source ) {
 
 };
 
+// File:src/materials/MeshPhongMaterial.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ * @author alteredq / http://alteredqualia.com/
+ *
+ * parameters = {
+ *  color: <hex>,
+ *  emissive: <hex>,
+ *  specular: <hex>,
+ *  shininess: <float>,
+ *  opacity: <float>,
+ *
+ *  map: new THREE.Texture( <Image> ),
+ *
+ *  lightMap: new THREE.Texture( <Image> ),
+ *  lightMapIntensity: <float>
+ *
+ *  aoMap: new THREE.Texture( <Image> ),
+ *  aoMapIntensity: <float>
+ *
+ *  emissiveMap: new THREE.Texture( <Image> ),
+ *
+ *  bumpMap: new THREE.Texture( <Image> ),
+ *  bumpScale: <float>,
+ *
+ *  normalMap: new THREE.Texture( <Image> ),
+ *  normalScale: <Vector2>,
+ *
+ *  displacementMap: new THREE.Texture( <Image> ),
+ *  displacementScale: <float>,
+ *  displacementBias: <float>,
+ *
+ *  specularMap: new THREE.Texture( <Image> ),
+ *
+ *  alphaMap: new THREE.Texture( <Image> ),
+ *
+ *  envMap: new THREE.TextureCube( [posx, negx, posy, negy, posz, negz] ),
+ *  combine: THREE.Multiply,
+ *  reflectivity: <float>,
+ *  refractionRatio: <float>,
+ *
+ *  shading: THREE.SmoothShading,
+ *  blending: THREE.NormalBlending,
+ *  depthTest: <bool>,
+ *  depthWrite: <bool>,
+ *
+ *  wireframe: <boolean>,
+ *  wireframeLinewidth: <float>,
+ *
+ *  vertexColors: THREE.NoColors / THREE.VertexColors / THREE.FaceColors,
+ *
+ *  skinning: <bool>,
+ *  morphTargets: <bool>,
+ *  morphNormals: <bool>,
+ *
+ *	fog: <bool>
+ * }
+ */
+
+THREE.MeshPhongMaterial = function ( parameters ) {
+
+	THREE.Material.call( this );
+
+	this.type = 'MeshPhongMaterial';
+
+	this.color = new THREE.Color( 0xffffff ); // diffuse
+	this.emissive = new THREE.Color( 0x000000 );
+	this.specular = new THREE.Color( 0x111111 );
+	this.shininess = 30;
+
+	this.metal = false;
+
+	this.map = null;
+
+	this.lightMap = null;
+	this.lightMapIntensity = 1.0;
+
+	this.aoMap = null;
+	this.aoMapIntensity = 1.0;
+
+	this.emissiveMap = null;
+
+	this.bumpMap = null;
+	this.bumpScale = 1;
+
+	this.normalMap = null;
+	this.normalScale = new THREE.Vector2( 1, 1 );
+
+	this.displacementMap = null;
+	this.displacementScale = 1;
+	this.displacementBias = 0;
+
+	this.specularMap = null;
+
+	this.alphaMap = null;
+
+	this.envMap = null;
+	this.combine = THREE.MultiplyOperation;
+	this.reflectivity = 1;
+	this.refractionRatio = 0.98;
+
+	this.fog = true;
+
+	this.shading = THREE.SmoothShading;
+
+	this.wireframe = false;
+	this.wireframeLinewidth = 1;
+	this.wireframeLinecap = 'round';
+	this.wireframeLinejoin = 'round';
+
+	this.vertexColors = THREE.NoColors;
+
+	this.skinning = false;
+	this.morphTargets = false;
+	this.morphNormals = false;
+
+	this.setValues( parameters );
+
+};
+
+THREE.MeshPhongMaterial.prototype = Object.create( THREE.Material.prototype );
+THREE.MeshPhongMaterial.prototype.constructor = THREE.MeshPhongMaterial;
+
+THREE.MeshPhongMaterial.prototype.copy = function ( source ) {
+
+	THREE.Material.prototype.copy.call( this, source );
+
+	this.color.copy( source.color );
+	this.emissive.copy( source.emissive );
+	this.specular.copy( source.specular );
+	this.shininess = source.shininess;
+
+	this.metal = source.metal;
+
+	this.map = source.map;
+
+	this.lightMap = source.lightMap;
+	this.lightMapIntensity = source.lightMapIntensity;
+
+	this.aoMap = source.aoMap;
+	this.aoMapIntensity = source.aoMapIntensity;
+
+	this.emissiveMap = source.emissiveMap;
+
+	this.bumpMap = source.bumpMap;
+	this.bumpScale = source.bumpScale;
+
+	this.normalMap = source.normalMap;
+	this.normalScale.copy( source.normalScale );
+
+	this.displacementMap = source.displacementMap;
+	this.displacementScale = source.displacementScale;
+	this.displacementBias = source.displacementBias;
+
+	this.specularMap = source.specularMap;
+
+	this.alphaMap = source.alphaMap;
+
+	this.envMap = source.envMap;
+	this.combine = source.combine;
+	this.reflectivity = source.reflectivity;
+	this.refractionRatio = source.refractionRatio;
+
+	this.fog = source.fog;
+
+	this.shading = source.shading;
+
+	this.wireframe = source.wireframe;
+	this.wireframeLinewidth = source.wireframeLinewidth;
+	this.wireframeLinecap = source.wireframeLinecap;
+	this.wireframeLinejoin = source.wireframeLinejoin;
+
+	this.vertexColors = source.vertexColors;
+
+	this.skinning = source.skinning;
+	this.morphTargets = source.morphTargets;
+	this.morphNormals = source.morphNormals;
+
+	return this;
+
+};
+
+// File:src/materials/MeshDepthMaterial.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ * @author alteredq / http://alteredqualia.com/
+ *
+ * parameters = {
+ *  opacity: <float>,
+ *
+ *  blending: THREE.NormalBlending,
+ *  depthTest: <bool>,
+ *  depthWrite: <bool>,
+ *
+ *  wireframe: <boolean>,
+ *  wireframeLinewidth: <float>
+ * }
+ */
+
+THREE.MeshDepthMaterial = function ( parameters ) {
+
+	THREE.Material.call( this );
+
+	this.type = 'MeshDepthMaterial';
+
+	this.morphTargets = false;
+	this.wireframe = false;
+	this.wireframeLinewidth = 1;
+
+	this.setValues( parameters );
+
+};
+
+THREE.MeshDepthMaterial.prototype = Object.create( THREE.Material.prototype );
+THREE.MeshDepthMaterial.prototype.constructor = THREE.MeshDepthMaterial;
+
+THREE.MeshDepthMaterial.prototype.copy = function ( source ) {
+
+	THREE.Material.prototype.copy.call( this, source );
+
+	this.wireframe = source.wireframe;
+	this.wireframeLinewidth = source.wireframeLinewidth;
+
+	return this;
+
+};
+
+// File:src/materials/MeshNormalMaterial.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ *
+ * parameters = {
+ *  opacity: <float>,
+ *
+ *  shading: THREE.FlatShading,
+ *  blending: THREE.NormalBlending,
+ *  depthTest: <bool>,
+ *  depthWrite: <bool>,
+ *
+ *  wireframe: <boolean>,
+ *  wireframeLinewidth: <float>
+ * }
+ */
+
+THREE.MeshNormalMaterial = function ( parameters ) {
+
+	THREE.Material.call( this, parameters );
+
+	this.type = 'MeshNormalMaterial';
+
+	this.wireframe = false;
+	this.wireframeLinewidth = 1;
+
+	this.morphTargets = false;
+
+	this.setValues( parameters );
+
+};
+
+THREE.MeshNormalMaterial.prototype = Object.create( THREE.Material.prototype );
+THREE.MeshNormalMaterial.prototype.constructor = THREE.MeshNormalMaterial;
+
+THREE.MeshNormalMaterial.prototype.copy = function ( source ) {
+
+	THREE.Material.prototype.copy.call( this, source );
+
+	this.wireframe = source.wireframe;
+	this.wireframeLinewidth = source.wireframeLinewidth;
+
+	return this;
+
+};
+
+// File:src/materials/MultiMaterial.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ */
+
+THREE.MultiMaterial = function ( materials ) {
+
+	this.uuid = THREE.Math.generateUUID();
+
+	this.type = 'MultiMaterial';
+
+	this.materials = materials instanceof Array ? materials : [];
+
+	this.visible = true;
+
+};
+
+THREE.MultiMaterial.prototype = {
+
+	constructor: THREE.MultiMaterial,
+
+	toJSON: function () {
+
+		var output = {
+			metadata: {
+				version: 4.2,
+				type: 'material',
+				generator: 'MaterialExporter'
+			},
+			uuid: this.uuid,
+			type: this.type,
+			materials: []
+		};
+
+		for ( var i = 0, l = this.materials.length; i < l; i ++ ) {
+
+			output.materials.push( this.materials[ i ].toJSON() );
+
+		}
+
+		output.visible = this.visible;
+
+		return output;
+
+	},
+
+	clone: function () {
+
+		var material = new this.constructor();
+
+		for ( var i = 0; i < this.materials.length; i ++ ) {
+
+			material.materials.push( this.materials[ i ].clone() );
+
+		}
+
+		material.visible = this.visible;
+
+		return material;
+
+	}
+
+};
+
+// backwards compatibility
+
+THREE.MeshFaceMaterial = THREE.MultiMaterial;
+
 // File:src/materials/PointsMaterial.js
 
 /**
@@ -17279,6 +17729,622 @@ THREE.ParticleSystemMaterial = function ( parameters ) {
 	return new THREE.PointsMaterial( parameters );
 
 };
+
+// File:src/materials/ShaderMaterial.js
+
+/**
+ * @author alteredq / http://alteredqualia.com/
+ *
+ * parameters = {
+ *  defines: { "label" : "value" },
+ *  uniforms: { "parameter1": { type: "f", value: 1.0 }, "parameter2": { type: "i" value2: 2 } },
+ *
+ *  fragmentShader: <string>,
+ *  vertexShader: <string>,
+ *
+ *  shading: THREE.SmoothShading,
+ *  blending: THREE.NormalBlending,
+ *  depthTest: <bool>,
+ *  depthWrite: <bool>,
+ *
+ *  wireframe: <boolean>,
+ *  wireframeLinewidth: <float>,
+ *
+ *  lights: <bool>,
+ *
+ *  vertexColors: THREE.NoColors / THREE.VertexColors / THREE.FaceColors,
+ *
+ *  skinning: <bool>,
+ *  morphTargets: <bool>,
+ *  morphNormals: <bool>,
+ *
+ *	fog: <bool>
+ * }
+ */
+
+THREE.ShaderMaterial = function ( parameters ) {
+
+	THREE.Material.call( this );
+
+	this.type = 'ShaderMaterial';
+
+	this.defines = {};
+	this.uniforms = {};
+
+	this.vertexShader = 'void main() {\n\tgl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );\n}';
+	this.fragmentShader = 'void main() {\n\tgl_FragColor = vec4( 1.0, 0.0, 0.0, 1.0 );\n}';
+
+	this.shading = THREE.SmoothShading;
+
+	this.linewidth = 1;
+
+	this.wireframe = false;
+	this.wireframeLinewidth = 1;
+
+	this.fog = false; // set to use scene fog
+
+	this.lights = false; // set to use scene lights
+
+	this.vertexColors = THREE.NoColors; // set to use "color" attribute stream
+
+	this.skinning = false; // set to use skinning attribute streams
+
+	this.morphTargets = false; // set to use morph targets
+	this.morphNormals = false; // set to use morph normals
+
+	this.derivatives = false; // set to use derivatives
+
+	// When rendered geometry doesn't include these attributes but the material does,
+	// use these default values in WebGL. This avoids errors when buffer data is missing.
+	this.defaultAttributeValues = {
+		'color': [ 1, 1, 1 ],
+		'uv': [ 0, 0 ],
+		'uv2': [ 0, 0 ]
+	};
+
+	this.index0AttributeName = undefined;
+
+	if ( parameters !== undefined ) {
+
+		if ( parameters.attributes !== undefined ) {
+
+			console.error( 'THREE.ShaderMaterial: attributes should now be defined in THREE.BufferGeometry instead.' );
+
+		}
+
+		this.setValues( parameters );
+
+	}
+
+};
+
+THREE.ShaderMaterial.prototype = Object.create( THREE.Material.prototype );
+THREE.ShaderMaterial.prototype.constructor = THREE.ShaderMaterial;
+
+THREE.ShaderMaterial.prototype.copy = function ( source ) {
+
+	THREE.Material.prototype.copy.call( this, source );
+
+	this.fragmentShader = source.fragmentShader;
+	this.vertexShader = source.vertexShader;
+
+	this.uniforms = THREE.UniformsUtils.clone( source.uniforms );
+
+	this.attributes = source.attributes;
+	this.defines = source.defines;
+
+	this.shading = source.shading;
+
+	this.wireframe = source.wireframe;
+	this.wireframeLinewidth = source.wireframeLinewidth;
+
+	this.fog = source.fog;
+
+	this.lights = source.lights;
+
+	this.vertexColors = source.vertexColors;
+
+	this.skinning = source.skinning;
+
+	this.morphTargets = source.morphTargets;
+	this.morphNormals = source.morphNormals;
+
+	this.derivatives = source.derivatives;
+
+	return this;
+
+};
+
+THREE.ShaderMaterial.prototype.toJSON = function ( meta ) {
+
+	var data = THREE.Material.prototype.toJSON.call( this, meta );
+
+	data.uniforms = this.uniforms;
+	data.attributes = this.attributes;
+	data.vertexShader = this.vertexShader;
+	data.fragmentShader = this.fragmentShader;
+
+	return data;
+
+};
+
+// File:src/materials/RawShaderMaterial.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ */
+
+THREE.RawShaderMaterial = function ( parameters ) {
+
+	THREE.ShaderMaterial.call( this, parameters );
+
+	this.type = 'RawShaderMaterial';
+
+};
+
+THREE.RawShaderMaterial.prototype = Object.create( THREE.ShaderMaterial.prototype );
+THREE.RawShaderMaterial.prototype.constructor = THREE.RawShaderMaterial;
+// File:src/materials/SpriteMaterial.js
+
+/**
+ * @author alteredq / http://alteredqualia.com/
+ *
+ * parameters = {
+ *  color: <hex>,
+ *  opacity: <float>,
+ *  map: new THREE.Texture( <Image> ),
+ *
+ *  blending: THREE.NormalBlending,
+ *  depthTest: <bool>,
+ *  depthWrite: <bool>,
+ *
+ *	uvOffset: new THREE.Vector2(),
+ *	uvScale: new THREE.Vector2(),
+ *
+ *  fog: <bool>
+ * }
+ */
+
+THREE.SpriteMaterial = function ( parameters ) {
+
+	THREE.Material.call( this );
+
+	this.type = 'SpriteMaterial';
+
+	this.color = new THREE.Color( 0xffffff );
+	this.map = null;
+
+	this.rotation = 0;
+
+	this.fog = false;
+
+	// set parameters
+
+	this.setValues( parameters );
+
+};
+
+THREE.SpriteMaterial.prototype = Object.create( THREE.Material.prototype );
+THREE.SpriteMaterial.prototype.constructor = THREE.SpriteMaterial;
+
+THREE.SpriteMaterial.prototype.copy = function ( source ) {
+
+	THREE.Material.prototype.copy.call( this, source );
+
+	this.color.copy( source.color );
+	this.map = source.map;
+
+	this.rotation = source.rotation;
+
+	this.fog = source.fog;
+
+	return this;
+
+};
+
+// File:src/textures/Texture.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ * @author alteredq / http://alteredqualia.com/
+ * @author szimek / https://github.com/szimek/
+ */
+
+THREE.Texture = function ( image, mapping, wrapS, wrapT, magFilter, minFilter, format, type, anisotropy ) {
+
+	Object.defineProperty( this, 'id', { value: THREE.TextureIdCount ++ } );
+
+	this.uuid = THREE.Math.generateUUID();
+
+	this.name = '';
+	this.sourceFile = '';
+
+	this.image = image !== undefined ? image : THREE.Texture.DEFAULT_IMAGE;
+	this.mipmaps = [];
+
+	this.mapping = mapping !== undefined ? mapping : THREE.Texture.DEFAULT_MAPPING;
+
+	this.wrapS = wrapS !== undefined ? wrapS : THREE.ClampToEdgeWrapping;
+	this.wrapT = wrapT !== undefined ? wrapT : THREE.ClampToEdgeWrapping;
+
+	this.magFilter = magFilter !== undefined ? magFilter : THREE.LinearFilter;
+	this.minFilter = minFilter !== undefined ? minFilter : THREE.LinearMipMapLinearFilter;
+
+	this.anisotropy = anisotropy !== undefined ? anisotropy : 1;
+
+	this.format = format !== undefined ? format : THREE.RGBAFormat;
+	this.type = type !== undefined ? type : THREE.UnsignedByteType;
+
+	this.offset = new THREE.Vector2( 0, 0 );
+	this.repeat = new THREE.Vector2( 1, 1 );
+
+	this.generateMipmaps = true;
+	this.premultiplyAlpha = false;
+	this.flipY = true;
+	this.unpackAlignment = 4; // valid values: 1, 2, 4, 8 (see http://www.khronos.org/opengles/sdk/docs/man/xhtml/glPixelStorei.xml)
+
+	this.version = 0;
+	this.onUpdate = null;
+
+};
+
+THREE.Texture.DEFAULT_IMAGE = undefined;
+THREE.Texture.DEFAULT_MAPPING = THREE.UVMapping;
+
+THREE.Texture.prototype = {
+
+	constructor: THREE.Texture,
+
+	set needsUpdate ( value ) {
+
+		if ( value === true ) this.version ++;
+
+	},
+
+	clone: function () {
+
+		return new this.constructor().copy( this );
+
+	},
+
+	copy: function ( source ) {
+
+		this.image = source.image;
+		this.mipmaps = source.mipmaps.slice( 0 );
+
+		this.mapping = source.mapping;
+
+		this.wrapS = source.wrapS;
+		this.wrapT = source.wrapT;
+
+		this.magFilter = source.magFilter;
+		this.minFilter = source.minFilter;
+
+		this.anisotropy = source.anisotropy;
+
+		this.format = source.format;
+		this.type = source.type;
+
+		this.offset.copy( source.offset );
+		this.repeat.copy( source.repeat );
+
+		this.generateMipmaps = source.generateMipmaps;
+		this.premultiplyAlpha = source.premultiplyAlpha;
+		this.flipY = source.flipY;
+		this.unpackAlignment = source.unpackAlignment;
+
+		return this;
+
+	},
+
+	toJSON: function ( meta ) {
+
+		if ( meta.textures[ this.uuid ] !== undefined ) {
+
+			return meta.textures[ this.uuid ];
+
+		}
+
+		function getDataURL( image ) {
+
+			var canvas;
+
+			if ( image.toDataURL !== undefined ) {
+
+				canvas = image;
+
+			} else {
+
+				canvas = document.createElement( 'canvas' );
+				canvas.width = image.width;
+				canvas.height = image.height;
+
+				canvas.getContext( '2d' ).drawImage( image, 0, 0, image.width, image.height );
+
+			}
+
+			if ( canvas.width > 2048 || canvas.height > 2048 ) {
+
+				return canvas.toDataURL( 'image/jpeg', 0.6 );
+
+			} else {
+
+				return canvas.toDataURL( 'image/png' );
+
+			}
+
+		}
+
+		var output = {
+			metadata: {
+				version: 4.4,
+				type: 'Texture',
+				generator: 'Texture.toJSON'
+			},
+
+			uuid: this.uuid,
+			name: this.name,
+
+			mapping: this.mapping,
+
+			repeat: [ this.repeat.x, this.repeat.y ],
+			offset: [ this.offset.x, this.offset.y ],
+			wrap: [ this.wrapS, this.wrapT ],
+
+			minFilter: this.minFilter,
+			magFilter: this.magFilter,
+			anisotropy: this.anisotropy
+		};
+
+		if ( this.image !== undefined ) {
+
+			// TODO: Move to THREE.Image
+
+			var image = this.image;
+
+			if ( image.uuid === undefined ) {
+
+				image.uuid = THREE.Math.generateUUID(); // UGH
+
+			}
+
+			if ( meta.images[ image.uuid ] === undefined ) {
+
+				meta.images[ image.uuid ] = {
+					uuid: image.uuid,
+					url: getDataURL( image )
+				};
+
+			}
+
+			output.image = image.uuid;
+
+		}
+
+		meta.textures[ this.uuid ] = output;
+
+		return output;
+
+	},
+
+	dispose: function () {
+
+		this.dispatchEvent( { type: 'dispose' } );
+
+	},
+
+	transformUv: function ( uv ) {
+
+		if ( this.mapping !== THREE.UVMapping )  return;
+
+		uv.multiply( this.repeat );
+		uv.add( this.offset );
+
+		if ( uv.x < 0 || uv.x > 1 ) {
+
+			switch ( this.wrapS ) {
+
+				case THREE.RepeatWrapping:
+
+					uv.x = uv.x - Math.floor( uv.x );
+					break;
+
+				case THREE.ClampToEdgeWrapping:
+
+					uv.x = uv.x < 0 ? 0 : 1;
+					break;
+
+				case THREE.MirroredRepeatWrapping:
+
+					if ( Math.abs( Math.floor( uv.x ) % 2 ) === 1 ) {
+
+						uv.x = Math.ceil( uv.x ) - uv.x;
+
+					} else {
+
+						uv.x = uv.x - Math.floor( uv.x );
+
+					}
+					break;
+
+			}
+
+		}
+
+		if ( uv.y < 0 || uv.y > 1 ) {
+
+			switch ( this.wrapT ) {
+
+				case THREE.RepeatWrapping:
+
+					uv.y = uv.y - Math.floor( uv.y );
+					break;
+
+				case THREE.ClampToEdgeWrapping:
+
+					uv.y = uv.y < 0 ? 0 : 1;
+					break;
+
+				case THREE.MirroredRepeatWrapping:
+
+					if ( Math.abs( Math.floor( uv.y ) % 2 ) === 1 ) {
+
+						uv.y = Math.ceil( uv.y ) - uv.y;
+
+					} else {
+
+						uv.y = uv.y - Math.floor( uv.y );
+
+					}
+					break;
+
+			}
+
+		}
+
+		if ( this.flipY ) {
+
+			uv.y = 1 - uv.y;
+
+		}
+
+	}
+
+};
+
+THREE.EventDispatcher.prototype.apply( THREE.Texture.prototype );
+
+THREE.TextureIdCount = 0;
+
+// File:src/textures/CanvasTexture.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ */
+
+THREE.CanvasTexture = function ( canvas, mapping, wrapS, wrapT, magFilter, minFilter, format, type, anisotropy ) {
+
+	THREE.Texture.call( this, canvas, mapping, wrapS, wrapT, magFilter, minFilter, format, type, anisotropy );
+
+	this.needsUpdate = true;
+
+};
+
+THREE.CanvasTexture.prototype = Object.create( THREE.Texture.prototype );
+THREE.CanvasTexture.prototype.constructor = THREE.CanvasTexture;
+
+// File:src/textures/CubeTexture.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ */
+
+THREE.CubeTexture = function ( images, mapping, wrapS, wrapT, magFilter, minFilter, format, type, anisotropy ) {
+
+	mapping = mapping !== undefined ? mapping : THREE.CubeReflectionMapping;
+
+	THREE.Texture.call( this, images, mapping, wrapS, wrapT, magFilter, minFilter, format, type, anisotropy );
+
+	this.images = images;
+	this.flipY = false;
+
+};
+
+THREE.CubeTexture.prototype = Object.create( THREE.Texture.prototype );
+THREE.CubeTexture.prototype.constructor = THREE.CubeTexture;
+
+THREE.CubeTexture.prototype.copy = function ( source ) {
+
+	THREE.Texture.prototype.copy.call( this, source );
+	
+	this.images = source.images;
+	
+	return this;
+
+};
+// File:src/textures/CompressedTexture.js
+
+/**
+ * @author alteredq / http://alteredqualia.com/
+ */
+
+THREE.CompressedTexture = function ( mipmaps, width, height, format, type, mapping, wrapS, wrapT, magFilter, minFilter, anisotropy ) {
+
+	THREE.Texture.call( this, null, mapping, wrapS, wrapT, magFilter, minFilter, format, type, anisotropy );
+
+	this.image = { width: width, height: height };
+	this.mipmaps = mipmaps;
+
+	// no flipping for cube textures
+	// (also flipping doesn't work for compressed textures )
+
+	this.flipY = false;
+
+	// can't generate mipmaps for compressed textures
+	// mips must be embedded in DDS files
+
+	this.generateMipmaps = false;
+
+};
+
+THREE.CompressedTexture.prototype = Object.create( THREE.Texture.prototype );
+THREE.CompressedTexture.prototype.constructor = THREE.CompressedTexture;
+
+// File:src/textures/DataTexture.js
+
+/**
+ * @author alteredq / http://alteredqualia.com/
+ */
+
+THREE.DataTexture = function ( data, width, height, format, type, mapping, wrapS, wrapT, magFilter, minFilter, anisotropy ) {
+
+	THREE.Texture.call( this, null, mapping, wrapS, wrapT, magFilter, minFilter, format, type, anisotropy );
+
+	this.image = { data: data, width: width, height: height };
+
+	this.magFilter = magFilter !== undefined ? magFilter : THREE.NearestFilter;
+	this.minFilter = minFilter !== undefined ? minFilter : THREE.NearestFilter;
+	
+	this.flipY = false;
+	this.generateMipmaps  = false;
+
+};
+
+THREE.DataTexture.prototype = Object.create( THREE.Texture.prototype );
+THREE.DataTexture.prototype.constructor = THREE.DataTexture;
+
+// File:src/textures/VideoTexture.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ */
+
+THREE.VideoTexture = function ( video, mapping, wrapS, wrapT, magFilter, minFilter, format, type, anisotropy ) {
+
+	THREE.Texture.call( this, video, mapping, wrapS, wrapT, magFilter, minFilter, format, type, anisotropy );
+
+	this.generateMipmaps = false;
+
+	var scope = this;
+
+	function update() {
+
+		requestAnimationFrame( update );
+
+		if ( video.readyState === video.HAVE_ENOUGH_DATA ) {
+
+			scope.needsUpdate = true;
+
+		}
+
+	}
+
+	update();
+
+};
+
+THREE.VideoTexture.prototype = Object.create( THREE.Texture.prototype );
+THREE.VideoTexture.prototype.constructor = THREE.VideoTexture;
 
 // File:src/objects/Group.js
 
@@ -17980,6 +19046,2200 @@ THREE.Mesh.prototype.raycast = ( function () {
 THREE.Mesh.prototype.clone = function () {
 
 	return new this.constructor( this.geometry, this.material ).copy( this );
+
+};
+
+// File:src/objects/Bone.js
+
+/**
+ * @author mikael emtinger / http://gomo.se/
+ * @author alteredq / http://alteredqualia.com/
+ * @author ikerr / http://verold.com
+ */
+
+THREE.Bone = function ( skin ) {
+
+	THREE.Object3D.call( this );
+
+	this.type = 'Bone';
+
+	this.skin = skin;
+
+};
+
+THREE.Bone.prototype = Object.create( THREE.Object3D.prototype );
+THREE.Bone.prototype.constructor = THREE.Bone;
+
+THREE.Bone.prototype.copy = function ( source ) {
+	
+	THREE.Object3D.prototype.copy.call( this, source );
+	
+	this.skin = source.skin;
+	
+	return this;
+
+};
+
+// File:src/objects/Skeleton.js
+
+/**
+ * @author mikael emtinger / http://gomo.se/
+ * @author alteredq / http://alteredqualia.com/
+ * @author michael guerrero / http://realitymeltdown.com
+ * @author ikerr / http://verold.com
+ */
+
+THREE.Skeleton = function ( bones, boneInverses, useVertexTexture ) {
+
+	this.useVertexTexture = useVertexTexture !== undefined ? useVertexTexture : true;
+
+	this.identityMatrix = new THREE.Matrix4();
+
+	// copy the bone array
+
+	bones = bones || [];
+
+	this.bones = bones.slice( 0 );
+
+	// create a bone texture or an array of floats
+
+	if ( this.useVertexTexture ) {
+
+		// layout (1 matrix = 4 pixels)
+		//      RGBA RGBA RGBA RGBA (=> column1, column2, column3, column4)
+		//  with  8x8  pixel texture max   16 bones * 4 pixels =  (8 * 8)
+		//       16x16 pixel texture max   64 bones * 4 pixels = (16 * 16)
+		//       32x32 pixel texture max  256 bones * 4 pixels = (32 * 32)
+		//       64x64 pixel texture max 1024 bones * 4 pixels = (64 * 64)
+
+		
+		var size = Math.sqrt( this.bones.length * 4 ); // 4 pixels needed for 1 matrix
+		size = THREE.Math.nextPowerOfTwo( Math.ceil( size ) );
+		size = Math.max( size, 4 );
+
+		this.boneTextureWidth = size;
+		this.boneTextureHeight = size;
+
+		this.boneMatrices = new Float32Array( this.boneTextureWidth * this.boneTextureHeight * 4 ); // 4 floats per RGBA pixel
+		this.boneTexture = new THREE.DataTexture( this.boneMatrices, this.boneTextureWidth, this.boneTextureHeight, THREE.RGBAFormat, THREE.FloatType );
+
+	} else {
+
+		this.boneMatrices = new Float32Array( 16 * this.bones.length );
+
+	}
+
+	// use the supplied bone inverses or calculate the inverses
+
+	if ( boneInverses === undefined ) {
+
+		this.calculateInverses();
+
+	} else {
+
+		if ( this.bones.length === boneInverses.length ) {
+
+			this.boneInverses = boneInverses.slice( 0 );
+
+		} else {
+
+			console.warn( 'THREE.Skeleton bonInverses is the wrong length.' );
+
+			this.boneInverses = [];
+
+			for ( var b = 0, bl = this.bones.length; b < bl; b ++ ) {
+
+				this.boneInverses.push( new THREE.Matrix4() );
+
+			}
+
+		}
+
+	}
+
+};
+
+THREE.Skeleton.prototype.calculateInverses = function () {
+
+	this.boneInverses = [];
+
+	for ( var b = 0, bl = this.bones.length; b < bl; b ++ ) {
+
+		var inverse = new THREE.Matrix4();
+
+		if ( this.bones[ b ] ) {
+
+			inverse.getInverse( this.bones[ b ].matrixWorld );
+
+		}
+
+		this.boneInverses.push( inverse );
+
+	}
+
+};
+
+THREE.Skeleton.prototype.pose = function () {
+
+	var bone;
+
+	// recover the bind-time world matrices
+
+	for ( var b = 0, bl = this.bones.length; b < bl; b ++ ) {
+
+		bone = this.bones[ b ];
+
+		if ( bone ) {
+
+			bone.matrixWorld.getInverse( this.boneInverses[ b ] );
+
+		}
+
+	}
+
+	// compute the local matrices, positions, rotations and scales
+
+	for ( var b = 0, bl = this.bones.length; b < bl; b ++ ) {
+
+		bone = this.bones[ b ];
+
+		if ( bone ) {
+
+			if ( bone.parent ) {
+
+				bone.matrix.getInverse( bone.parent.matrixWorld );
+				bone.matrix.multiply( bone.matrixWorld );
+
+			} else {
+
+				bone.matrix.copy( bone.matrixWorld );
+
+			}
+
+			bone.matrix.decompose( bone.position, bone.quaternion, bone.scale );
+
+		}
+
+	}
+
+};
+
+THREE.Skeleton.prototype.update = ( function () {
+
+	var offsetMatrix = new THREE.Matrix4();
+
+	return function update() {
+
+		// flatten bone matrices to array
+
+		for ( var b = 0, bl = this.bones.length; b < bl; b ++ ) {
+
+			// compute the offset between the current and the original transform
+
+			var matrix = this.bones[ b ] ? this.bones[ b ].matrixWorld : this.identityMatrix;
+
+			offsetMatrix.multiplyMatrices( matrix, this.boneInverses[ b ] );
+			offsetMatrix.flattenToArrayOffset( this.boneMatrices, b * 16 );
+
+		}
+
+		if ( this.useVertexTexture ) {
+
+			this.boneTexture.needsUpdate = true;
+
+		}
+
+	};
+
+} )();
+
+THREE.Skeleton.prototype.clone = function () {
+
+	return new THREE.Skeleton( this.bones, this.boneInverses, this.useVertexTexture );
+
+};
+
+// File:src/objects/SkinnedMesh.js
+
+/**
+ * @author mikael emtinger / http://gomo.se/
+ * @author alteredq / http://alteredqualia.com/
+ * @author ikerr / http://verold.com
+ */
+
+THREE.SkinnedMesh = function ( geometry, material, useVertexTexture ) {
+
+	THREE.Mesh.call( this, geometry, material );
+
+	this.type = 'SkinnedMesh';
+
+	this.bindMode = "attached";
+	this.bindMatrix = new THREE.Matrix4();
+	this.bindMatrixInverse = new THREE.Matrix4();
+
+	// init bones
+
+	// TODO: remove bone creation as there is no reason (other than
+	// convenience) for THREE.SkinnedMesh to do this.
+
+	var bones = [];
+
+	if ( this.geometry && this.geometry.bones !== undefined ) {
+
+		var bone, gbone;
+
+		for ( var b = 0, bl = this.geometry.bones.length; b < bl; ++ b ) {
+
+			gbone = this.geometry.bones[ b ];
+
+			bone = new THREE.Bone( this );
+			bones.push( bone );
+
+			bone.name = gbone.name;
+			bone.position.fromArray( gbone.pos );
+			bone.quaternion.fromArray( gbone.rotq );
+			if ( gbone.scl !== undefined ) bone.scale.fromArray( gbone.scl );
+
+		}
+
+		for ( var b = 0, bl = this.geometry.bones.length; b < bl; ++ b ) {
+
+			gbone = this.geometry.bones[ b ];
+
+			if ( gbone.parent !== - 1 && gbone.parent !== null) {
+
+				bones[ gbone.parent ].add( bones[ b ] );
+
+			} else {
+
+				this.add( bones[ b ] );
+
+			}
+
+		}
+
+	}
+
+	this.normalizeSkinWeights();
+
+	this.updateMatrixWorld( true );
+	this.bind( new THREE.Skeleton( bones, undefined, useVertexTexture ), this.matrixWorld );
+
+};
+
+
+THREE.SkinnedMesh.prototype = Object.create( THREE.Mesh.prototype );
+THREE.SkinnedMesh.prototype.constructor = THREE.SkinnedMesh;
+
+THREE.SkinnedMesh.prototype.bind = function( skeleton, bindMatrix ) {
+
+	this.skeleton = skeleton;
+
+	if ( bindMatrix === undefined ) {
+
+		this.updateMatrixWorld( true );
+		
+		this.skeleton.calculateInverses();
+
+		bindMatrix = this.matrixWorld;
+
+	}
+
+	this.bindMatrix.copy( bindMatrix );
+	this.bindMatrixInverse.getInverse( bindMatrix );
+
+};
+
+THREE.SkinnedMesh.prototype.pose = function () {
+
+	this.skeleton.pose();
+
+};
+
+THREE.SkinnedMesh.prototype.normalizeSkinWeights = function () {
+
+	if ( this.geometry instanceof THREE.Geometry ) {
+
+		for ( var i = 0; i < this.geometry.skinIndices.length; i ++ ) {
+
+			var sw = this.geometry.skinWeights[ i ];
+
+			var scale = 1.0 / sw.lengthManhattan();
+
+			if ( scale !== Infinity ) {
+
+				sw.multiplyScalar( scale );
+
+			} else {
+
+				sw.set( 1 ); // this will be normalized by the shader anyway
+
+			}
+
+		}
+
+	} else {
+
+		// skinning weights assumed to be normalized for THREE.BufferGeometry
+
+	}
+
+};
+
+THREE.SkinnedMesh.prototype.updateMatrixWorld = function( force ) {
+
+	THREE.Mesh.prototype.updateMatrixWorld.call( this, true );
+
+	if ( this.bindMode === "attached" ) {
+
+		this.bindMatrixInverse.getInverse( this.matrixWorld );
+
+	} else if ( this.bindMode === "detached" ) {
+
+		this.bindMatrixInverse.getInverse( this.bindMatrix );
+
+	} else {
+
+		console.warn( 'THREE.SkinnedMesh unrecognized bindMode: ' + this.bindMode );
+
+	}
+
+};
+
+THREE.SkinnedMesh.prototype.clone = function() {
+
+	return new this.constructor( this.geometry, this.material, this.useVertexTexture ).copy( this );
+
+};
+
+// File:src/objects/LOD.js
+
+/**
+ * @author mikael emtinger / http://gomo.se/
+ * @author alteredq / http://alteredqualia.com/
+ * @author mrdoob / http://mrdoob.com/
+ */
+
+THREE.LOD = function () {
+
+	THREE.Object3D.call( this );
+
+	this.type = 'LOD';
+
+	Object.defineProperties( this, {
+		levels: {
+			enumerable: true,
+			value: []
+		},
+		objects: {
+			get: function () {
+
+				console.warn( 'THREE.LOD: .objects has been renamed to .levels.' );
+				return this.levels;
+
+			}
+		}
+	} );
+
+};
+
+
+THREE.LOD.prototype = Object.create( THREE.Object3D.prototype );
+THREE.LOD.prototype.constructor = THREE.LOD;
+
+THREE.LOD.prototype.addLevel = function ( object, distance ) {
+
+	if ( distance === undefined ) distance = 0;
+
+	distance = Math.abs( distance );
+
+	var levels = this.levels;
+
+	for ( var l = 0; l < levels.length; l ++ ) {
+
+		if ( distance < levels[ l ].distance ) {
+
+			break;
+
+		}
+
+	}
+
+	levels.splice( l, 0, { distance: distance, object: object } );
+
+	this.add( object );
+
+};
+
+THREE.LOD.prototype.getObjectForDistance = function ( distance ) {
+
+	var levels = this.levels;
+
+	for ( var i = 1, l = levels.length; i < l; i ++ ) {
+
+		if ( distance < levels[ i ].distance ) {
+
+			break;
+
+		}
+
+	}
+
+	return levels[ i - 1 ].object;
+
+};
+
+THREE.LOD.prototype.raycast = ( function () {
+
+	var matrixPosition = new THREE.Vector3();
+
+	return function raycast( raycaster, intersects ) {
+
+		matrixPosition.setFromMatrixPosition( this.matrixWorld );
+
+		var distance = raycaster.ray.origin.distanceTo( matrixPosition );
+
+		this.getObjectForDistance( distance ).raycast( raycaster, intersects );
+
+	};
+
+}() );
+
+THREE.LOD.prototype.update = function () {
+
+	var v1 = new THREE.Vector3();
+	var v2 = new THREE.Vector3();
+
+	return function update( camera ) {
+
+		var levels = this.levels;
+
+		if ( levels.length > 1 ) {
+
+			v1.setFromMatrixPosition( camera.matrixWorld );
+			v2.setFromMatrixPosition( this.matrixWorld );
+
+			var distance = v1.distanceTo( v2 );
+
+			levels[ 0 ].object.visible = true;
+
+			for ( var i = 1, l = levels.length; i < l; i ++ ) {
+
+				if ( distance >= levels[ i ].distance ) {
+
+					levels[ i - 1 ].object.visible = false;
+					levels[ i ].object.visible = true;
+
+				} else {
+
+					break;
+
+				}
+
+			}
+
+			for ( ; i < l; i ++ ) {
+
+				levels[ i ].object.visible = false;
+
+			}
+
+		}
+
+	};
+
+}();
+
+THREE.LOD.prototype.copy = function ( source ) {
+
+	THREE.Object3D.prototype.copy.call( this, source, false );
+
+	var levels = source.levels;
+
+	for ( var i = 0, l = levels.length; i < l; i ++ ) {
+
+		var level = levels[ i ];
+
+		this.addLevel( level.object.clone(), level.distance );
+
+	}
+
+	return this;
+
+};
+
+THREE.LOD.prototype.toJSON = function ( meta ) {
+
+	var data = THREE.Object3D.prototype.toJSON.call( this, meta );
+
+	data.object.levels = [];
+
+	var levels = this.levels;
+
+	for ( var i = 0, l = levels.length; i < l; i ++ ) {
+
+		var level = levels[ i ];
+
+		data.object.levels.push( {
+			object: level.object.uuid,
+			distance: level.distance
+		} );
+
+	}
+
+	return data;
+
+};
+
+// File:src/objects/Sprite.js
+
+/**
+ * @author mikael emtinger / http://gomo.se/
+ * @author alteredq / http://alteredqualia.com/
+ */
+
+THREE.Sprite = ( function () {
+
+	var indices = new Uint16Array( [ 0, 1, 2,  0, 2, 3 ] );
+	var vertices = new Float32Array( [ - 0.5, - 0.5, 0,   0.5, - 0.5, 0,   0.5, 0.5, 0,   - 0.5, 0.5, 0 ] );
+	var uvs = new Float32Array( [ 0, 0,   1, 0,   1, 1,   0, 1 ] );
+
+	var geometry = new THREE.BufferGeometry();
+	geometry.setIndex( new THREE.BufferAttribute( indices, 1 ) );
+	geometry.addAttribute( 'position', new THREE.BufferAttribute( vertices, 3 ) );
+	geometry.addAttribute( 'uv', new THREE.BufferAttribute( uvs, 2 ) );
+
+	return function Sprite( material ) {
+
+		THREE.Object3D.call( this );
+
+		this.type = 'Sprite';
+
+		this.geometry = geometry;
+		this.material = ( material !== undefined ) ? material : new THREE.SpriteMaterial();
+
+	};
+
+} )();
+
+THREE.Sprite.prototype = Object.create( THREE.Object3D.prototype );
+THREE.Sprite.prototype.constructor = THREE.Sprite;
+
+THREE.Sprite.prototype.raycast = ( function () {
+
+	var matrixPosition = new THREE.Vector3();
+
+	return function raycast( raycaster, intersects ) {
+
+		matrixPosition.setFromMatrixPosition( this.matrixWorld );
+
+		var distanceSq = raycaster.ray.distanceSqToPoint( matrixPosition );
+		var guessSizeSq = this.scale.x * this.scale.y;
+
+		if ( distanceSq > guessSizeSq ) {
+
+			return;
+
+		}
+
+		intersects.push( {
+
+			distance: Math.sqrt( distanceSq ),
+			point: this.position,
+			face: null,
+			object: this
+
+		} );
+
+	};
+
+}() );
+
+THREE.Sprite.prototype.clone = function () {
+
+	return new this.constructor( this.material ).copy( this );
+
+};
+
+// Backwards compatibility
+
+THREE.Particle = THREE.Sprite;
+
+// File:src/objects/LensFlare.js
+
+/**
+ * @author mikael emtinger / http://gomo.se/
+ * @author alteredq / http://alteredqualia.com/
+ */
+
+THREE.LensFlare = function ( texture, size, distance, blending, color ) {
+
+	THREE.Object3D.call( this );
+
+	this.lensFlares = [];
+
+	this.positionScreen = new THREE.Vector3();
+	this.customUpdateCallback = undefined;
+
+	if ( texture !== undefined ) {
+
+		this.add( texture, size, distance, blending, color );
+
+	}
+
+};
+
+THREE.LensFlare.prototype = Object.create( THREE.Object3D.prototype );
+THREE.LensFlare.prototype.constructor = THREE.LensFlare;
+
+
+/*
+ * Add: adds another flare
+ */
+
+THREE.LensFlare.prototype.add = function ( texture, size, distance, blending, color, opacity ) {
+
+	if ( size === undefined ) size = - 1;
+	if ( distance === undefined ) distance = 0;
+	if ( opacity === undefined ) opacity = 1;
+	if ( color === undefined ) color = new THREE.Color( 0xffffff );
+	if ( blending === undefined ) blending = THREE.NormalBlending;
+
+	distance = Math.min( distance, Math.max( 0, distance ) );
+
+	this.lensFlares.push( {
+		texture: texture,	// THREE.Texture
+		size: size, 		// size in pixels (-1 = use texture.width)
+		distance: distance, 	// distance (0-1) from light source (0=at light source)
+		x: 0, y: 0, z: 0,	// screen position (-1 => 1) z = 0 is in front z = 1 is back
+		scale: 1, 		// scale
+		rotation: 0, 		// rotation
+		opacity: opacity,	// opacity
+		color: color,		// color
+		blending: blending	// blending
+	} );
+
+};
+
+/*
+ * Update lens flares update positions on all flares based on the screen position
+ * Set myLensFlare.customUpdateCallback to alter the flares in your project specific way.
+ */
+
+THREE.LensFlare.prototype.updateLensFlares = function () {
+
+	var f, fl = this.lensFlares.length;
+	var flare;
+	var vecX = - this.positionScreen.x * 2;
+	var vecY = - this.positionScreen.y * 2;
+
+	for ( f = 0; f < fl; f ++ ) {
+
+		flare = this.lensFlares[ f ];
+
+		flare.x = this.positionScreen.x + vecX * flare.distance;
+		flare.y = this.positionScreen.y + vecY * flare.distance;
+
+		flare.wantedRotation = flare.x * Math.PI * 0.25;
+		flare.rotation += ( flare.wantedRotation - flare.rotation ) * 0.25;
+
+	}
+
+};
+
+THREE.LensFlare.prototype.copy = function ( source ) {
+
+	THREE.Object3D.prototype.copy.call( this, source );
+
+	this.positionScreen.copy( source.positionScreen );
+	this.customUpdateCallback = source.customUpdateCallback;
+
+	for ( var i = 0, l = source.lensFlares.length; i < l; i ++ ) {
+
+		this.lensFlares.push( source.lensFlares[ i ] );
+
+	}
+
+	return this;
+
+};
+
+// File:src/scenes/Scene.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ */
+
+THREE.Scene = function () {
+
+	THREE.Object3D.call( this );
+
+	this.type = 'Scene';
+
+	this.fog = null;
+	this.overrideMaterial = null;
+
+	this.autoUpdate = true; // checked by the renderer
+
+};
+
+THREE.Scene.prototype = Object.create( THREE.Object3D.prototype );
+THREE.Scene.prototype.constructor = THREE.Scene;
+
+THREE.Scene.prototype.copy = function ( source ) {
+
+	THREE.Object3D.prototype.copy.call( this, source );
+
+	if ( source.fog !== null ) this.fog = source.fog.clone();
+	if ( source.overrideMaterial !== null ) this.overrideMaterial = source.overrideMaterial.clone();
+
+	this.autoUpdate = source.autoUpdate;
+	this.matrixAutoUpdate = source.matrixAutoUpdate;
+
+	return this;
+
+};
+
+// File:src/scenes/Fog.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ * @author alteredq / http://alteredqualia.com/
+ */
+
+THREE.Fog = function ( color, near, far ) {
+
+	this.name = '';
+
+	this.color = new THREE.Color( color );
+
+	this.near = ( near !== undefined ) ? near : 1;
+	this.far = ( far !== undefined ) ? far : 1000;
+
+};
+
+THREE.Fog.prototype.clone = function () {
+
+	return new THREE.Fog( this.color.getHex(), this.near, this.far );
+
+};
+
+// File:src/scenes/FogExp2.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ * @author alteredq / http://alteredqualia.com/
+ */
+
+THREE.FogExp2 = function ( color, density ) {
+
+	this.name = '';
+
+	this.color = new THREE.Color( color );
+	this.density = ( density !== undefined ) ? density : 0.00025;
+
+};
+
+THREE.FogExp2.prototype.clone = function () {
+
+	return new THREE.FogExp2( this.color.getHex(), this.density );
+
+};
+
+// File:src/renderers/shaders/ShaderChunk.js
+
+THREE.ShaderChunk = {};
+
+// File:src/renderers/shaders/ShaderChunk/alphamap_fragment.glsl
+
+THREE.ShaderChunk[ 'alphamap_fragment' ] ="#ifdef USE_ALPHAMAP\n\n\tdiffuseColor.a *= texture2D( alphaMap, vUv ).g;\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/alphamap_pars_fragment.glsl
+
+THREE.ShaderChunk[ 'alphamap_pars_fragment' ] ="#ifdef USE_ALPHAMAP\n\n\tuniform sampler2D alphaMap;\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/alphatest_fragment.glsl
+
+THREE.ShaderChunk[ 'alphatest_fragment' ] ="#ifdef ALPHATEST\n\n\tif ( diffuseColor.a < ALPHATEST ) discard;\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/aomap_fragment.glsl
+
+THREE.ShaderChunk[ 'aomap_fragment' ] ="#ifdef USE_AOMAP\n\n\ttotalAmbientLight *= ( texture2D( aoMap, vUv2 ).r - 1.0 ) * aoMapIntensity + 1.0;\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/aomap_pars_fragment.glsl
+
+THREE.ShaderChunk[ 'aomap_pars_fragment' ] ="#ifdef USE_AOMAP\n\n\tuniform sampler2D aoMap;\n\tuniform float aoMapIntensity;\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/begin_vertex.glsl
+
+THREE.ShaderChunk[ 'begin_vertex' ] ="\nvec3 transformed = vec3( position );\n";
+
+// File:src/renderers/shaders/ShaderChunk/beginnormal_vertex.glsl
+
+THREE.ShaderChunk[ 'beginnormal_vertex' ] ="\nvec3 objectNormal = vec3( normal );\n";
+
+// File:src/renderers/shaders/ShaderChunk/bumpmap_pars_fragment.glsl
+
+THREE.ShaderChunk[ 'bumpmap_pars_fragment' ] ="#ifdef USE_BUMPMAP\n\n\tuniform sampler2D bumpMap;\n\tuniform float bumpScale;\n\n\t// Derivative maps - bump mapping unparametrized surfaces by Morten Mikkelsen\n\t// http://mmikkelsen3d.blogspot.sk/2011/07/derivative-maps.html\n\n\t// Evaluate the derivative of the height w.r.t. screen-space using forward differencing (listing 2)\n\n\tvec2 dHdxy_fwd() {\n\n\t\tvec2 dSTdx = dFdx( vUv );\n\t\tvec2 dSTdy = dFdy( vUv );\n\n\t\tfloat Hll = bumpScale * texture2D( bumpMap, vUv ).x;\n\t\tfloat dBx = bumpScale * texture2D( bumpMap, vUv + dSTdx ).x - Hll;\n\t\tfloat dBy = bumpScale * texture2D( bumpMap, vUv + dSTdy ).x - Hll;\n\n\t\treturn vec2( dBx, dBy );\n\n\t}\n\n\tvec3 perturbNormalArb( vec3 surf_pos, vec3 surf_norm, vec2 dHdxy ) {\n\n\t\tvec3 vSigmaX = dFdx( surf_pos );\n\t\tvec3 vSigmaY = dFdy( surf_pos );\n\t\tvec3 vN = surf_norm;\t\t// normalized\n\n\t\tvec3 R1 = cross( vSigmaY, vN );\n\t\tvec3 R2 = cross( vN, vSigmaX );\n\n\t\tfloat fDet = dot( vSigmaX, R1 );\n\n\t\tvec3 vGrad = sign( fDet ) * ( dHdxy.x * R1 + dHdxy.y * R2 );\n\t\treturn normalize( abs( fDet ) * surf_norm - vGrad );\n\n\t}\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/color_fragment.glsl
+
+THREE.ShaderChunk[ 'color_fragment' ] ="#ifdef USE_COLOR\n\n\tdiffuseColor.rgb *= vColor;\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/color_pars_fragment.glsl
+
+THREE.ShaderChunk[ 'color_pars_fragment' ] ="#ifdef USE_COLOR\n\n\tvarying vec3 vColor;\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/color_pars_vertex.glsl
+
+THREE.ShaderChunk[ 'color_pars_vertex' ] ="#ifdef USE_COLOR\n\n\tvarying vec3 vColor;\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/color_vertex.glsl
+
+THREE.ShaderChunk[ 'color_vertex' ] ="#ifdef USE_COLOR\n\n\tvColor.xyz = color.xyz;\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/common.glsl
+
+THREE.ShaderChunk[ 'common' ] ="#define PI 3.14159\n#define PI2 6.28318\n#define RECIPROCAL_PI2 0.15915494\n#define LOG2 1.442695\n#define EPSILON 1e-6\n\n#define saturate(a) clamp( a, 0.0, 1.0 )\n#define whiteCompliment(a) ( 1.0 - saturate( a ) )\n\nvec3 transformDirection( in vec3 normal, in mat4 matrix ) {\n\n\treturn normalize( ( matrix * vec4( normal, 0.0 ) ).xyz );\n\n}\n\n// http://en.wikibooks.org/wiki/GLSL_Programming/Applying_Matrix_Transformations\nvec3 inverseTransformDirection( in vec3 normal, in mat4 matrix ) {\n\n\treturn normalize( ( vec4( normal, 0.0 ) * matrix ).xyz );\n\n}\n\nvec3 projectOnPlane(in vec3 point, in vec3 pointOnPlane, in vec3 planeNormal ) {\n\n\tfloat distance = dot( planeNormal, point - pointOnPlane );\n\n\treturn - distance * planeNormal + point;\n\n}\n\nfloat sideOfPlane( in vec3 point, in vec3 pointOnPlane, in vec3 planeNormal ) {\n\n\treturn sign( dot( point - pointOnPlane, planeNormal ) );\n\n}\n\nvec3 linePlaneIntersect( in vec3 pointOnLine, in vec3 lineDirection, in vec3 pointOnPlane, in vec3 planeNormal ) {\n\n\treturn lineDirection * ( dot( planeNormal, pointOnPlane - pointOnLine ) / dot( planeNormal, lineDirection ) ) + pointOnLine;\n\n}\n\nfloat calcLightAttenuation( float lightDistance, float cutoffDistance, float decayExponent ) {\n\n\tif ( decayExponent > 0.0 ) {\n\n\t  return pow( saturate( -lightDistance / cutoffDistance + 1.0 ), decayExponent );\n\n\t}\n\n\treturn 1.0;\n\n}\n\nvec3 F_Schlick( in vec3 specularColor, in float dotLH ) {\n\n\t// Original approximation by Christophe Schlick '94\n\t//;float fresnel = pow( 1.0 - dotLH, 5.0 );\n\n\t// Optimized variant (presented by Epic at SIGGRAPH '13)\n\tfloat fresnel = exp2( ( -5.55437 * dotLH - 6.98316 ) * dotLH );\n\n\treturn ( 1.0 - specularColor ) * fresnel + specularColor;\n\n}\n\nfloat G_BlinnPhong_Implicit( /* in float dotNL, in float dotNV */ ) {\n\n\t// geometry term is (n⋅l)(n⋅v) / 4(n⋅l)(n⋅v)\n\n\treturn 0.25;\n\n}\n\nfloat D_BlinnPhong( in float shininess, in float dotNH ) {\n\n\t// factor of 1/PI in distribution term omitted\n\n\treturn ( shininess * 0.5 + 1.0 ) * pow( dotNH, shininess );\n\n}\n\nvec3 BRDF_BlinnPhong( in vec3 specularColor, in float shininess, in vec3 normal, in vec3 lightDir, in vec3 viewDir ) {\n\n\tvec3 halfDir = normalize( lightDir + viewDir );\n\n\t//float dotNL = saturate( dot( normal, lightDir ) );\n\t//float dotNV = saturate( dot( normal, viewDir ) );\n\tfloat dotNH = saturate( dot( normal, halfDir ) );\n\tfloat dotLH = saturate( dot( lightDir, halfDir ) );\n\n\tvec3 F = F_Schlick( specularColor, dotLH );\n\n\tfloat G = G_BlinnPhong_Implicit( /* dotNL, dotNV */ );\n\n\tfloat D = D_BlinnPhong( shininess, dotNH );\n\n\treturn F * G * D;\n\n}\n\nvec3 inputToLinear( in vec3 a ) {\n\n\t#ifdef GAMMA_INPUT\n\n\t\treturn pow( a, vec3( float( GAMMA_FACTOR ) ) );\n\n\t#else\n\n\t\treturn a;\n\n\t#endif\n\n}\n\nvec3 linearToOutput( in vec3 a ) {\n\n\t#ifdef GAMMA_OUTPUT\n\n\t\treturn pow( a, vec3( 1.0 / float( GAMMA_FACTOR ) ) );\n\n\t#else\n\n\t\treturn a;\n\n\t#endif\n\n}\n";
+
+// File:src/renderers/shaders/ShaderChunk/defaultnormal_vertex.glsl
+
+THREE.ShaderChunk[ 'defaultnormal_vertex' ] ="#ifdef FLIP_SIDED\n\n\tobjectNormal = -objectNormal;\n\n#endif\n\nvec3 transformedNormal = normalMatrix * objectNormal;\n";
+
+// File:src/renderers/shaders/ShaderChunk/displacementmap_vertex.glsl
+
+THREE.ShaderChunk[ 'displacementmap_vertex' ] ="#ifdef USE_DISPLACEMENTMAP\n\n\ttransformed += normal * ( texture2D( displacementMap, uv ).x * displacementScale + displacementBias );\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/displacementmap_pars_vertex.glsl
+
+THREE.ShaderChunk[ 'displacementmap_pars_vertex' ] ="#ifdef USE_DISPLACEMENTMAP\n\n\tuniform sampler2D displacementMap;\n\tuniform float displacementScale;\n\tuniform float displacementBias;\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/emissivemap_fragment.glsl
+
+THREE.ShaderChunk[ 'emissivemap_fragment' ] ="#ifdef USE_EMISSIVEMAP\n\n\tvec4 emissiveColor = texture2D( emissiveMap, vUv );\n\n\temissiveColor.rgb = inputToLinear( emissiveColor.rgb );\n\n\ttotalEmissiveLight *= emissiveColor.rgb;\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/emissivemap_pars_fragment.glsl
+
+THREE.ShaderChunk[ 'emissivemap_pars_fragment' ] ="#ifdef USE_EMISSIVEMAP\n\n\tuniform sampler2D emissiveMap;\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/envmap_fragment.glsl
+
+THREE.ShaderChunk[ 'envmap_fragment' ] ="#ifdef USE_ENVMAP\n\n\t#if defined( USE_BUMPMAP ) || defined( USE_NORMALMAP ) || defined( PHONG )\n\n\t\tvec3 cameraToVertex = normalize( vWorldPosition - cameraPosition );\n\n\t\t// Transforming Normal Vectors with the Inverse Transformation\n\t\tvec3 worldNormal = inverseTransformDirection( normal, viewMatrix );\n\n\t\t#ifdef ENVMAP_MODE_REFLECTION\n\n\t\t\tvec3 reflectVec = reflect( cameraToVertex, worldNormal );\n\n\t\t#else\n\n\t\t\tvec3 reflectVec = refract( cameraToVertex, worldNormal, refractionRatio );\n\n\t\t#endif\n\n\t#else\n\n\t\tvec3 reflectVec = vReflect;\n\n\t#endif\n\n\t#ifdef DOUBLE_SIDED\n\t\tfloat flipNormal = ( float( gl_FrontFacing ) * 2.0 - 1.0 );\n\t#else\n\t\tfloat flipNormal = 1.0;\n\t#endif\n\n\t#ifdef ENVMAP_TYPE_CUBE\n\t\tvec4 envColor = textureCube( envMap, flipNormal * vec3( flipEnvMap * reflectVec.x, reflectVec.yz ) );\n\n\t#elif defined( ENVMAP_TYPE_EQUIREC )\n\t\tvec2 sampleUV;\n\t\tsampleUV.y = saturate( flipNormal * reflectVec.y * 0.5 + 0.5 );\n\t\tsampleUV.x = atan( flipNormal * reflectVec.z, flipNormal * reflectVec.x ) * RECIPROCAL_PI2 + 0.5;\n\t\tvec4 envColor = texture2D( envMap, sampleUV );\n\n\t#elif defined( ENVMAP_TYPE_SPHERE )\n\t\tvec3 reflectView = flipNormal * normalize((viewMatrix * vec4( reflectVec, 0.0 )).xyz + vec3(0.0,0.0,1.0));\n\t\tvec4 envColor = texture2D( envMap, reflectView.xy * 0.5 + 0.5 );\n\t#endif\n\n\tenvColor.xyz = inputToLinear( envColor.xyz );\n\n\t#ifdef ENVMAP_BLENDING_MULTIPLY\n\n\t\toutgoingLight = mix( outgoingLight, outgoingLight * envColor.xyz, specularStrength * reflectivity );\n\n\t#elif defined( ENVMAP_BLENDING_MIX )\n\n\t\toutgoingLight = mix( outgoingLight, envColor.xyz, specularStrength * reflectivity );\n\n\t#elif defined( ENVMAP_BLENDING_ADD )\n\n\t\toutgoingLight += envColor.xyz * specularStrength * reflectivity;\n\n\t#endif\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/envmap_pars_fragment.glsl
+
+THREE.ShaderChunk[ 'envmap_pars_fragment' ] ="#ifdef USE_ENVMAP\n\n\tuniform float reflectivity;\n\t#ifdef ENVMAP_TYPE_CUBE\n\t\tuniform samplerCube envMap;\n\t#else\n\t\tuniform sampler2D envMap;\n\t#endif\n\tuniform float flipEnvMap;\n\n\t#if defined( USE_BUMPMAP ) || defined( USE_NORMALMAP ) || defined( PHONG )\n\n\t\tuniform float refractionRatio;\n\n\t#else\n\n\t\tvarying vec3 vReflect;\n\n\t#endif\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/envmap_pars_vertex.glsl
+
+THREE.ShaderChunk[ 'envmap_pars_vertex' ] ="#if defined( USE_ENVMAP ) && ! defined( USE_BUMPMAP ) && ! defined( USE_NORMALMAP ) && ! defined( PHONG )\n\n\tvarying vec3 vReflect;\n\n\tuniform float refractionRatio;\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/envmap_vertex.glsl
+
+THREE.ShaderChunk[ 'envmap_vertex' ] ="#if defined( USE_ENVMAP ) && ! defined( USE_BUMPMAP ) && ! defined( USE_NORMALMAP ) && ! defined( PHONG )\n\n\tvec3 cameraToVertex = normalize( worldPosition.xyz - cameraPosition );\n\n\tvec3 worldNormal = inverseTransformDirection( transformedNormal, viewMatrix );\n\n\t#ifdef ENVMAP_MODE_REFLECTION\n\n\t\tvReflect = reflect( cameraToVertex, worldNormal );\n\n\t#else\n\n\t\tvReflect = refract( cameraToVertex, worldNormal, refractionRatio );\n\n\t#endif\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/fog_fragment.glsl
+
+THREE.ShaderChunk[ 'fog_fragment' ] ="#ifdef USE_FOG\n\n\t#ifdef USE_LOGDEPTHBUF_EXT\n\n\t\tfloat depth = gl_FragDepthEXT / gl_FragCoord.w;\n\n\t#else\n\n\t\tfloat depth = gl_FragCoord.z / gl_FragCoord.w;\n\n\t#endif\n\n\t#ifdef FOG_EXP2\n\n\t\tfloat fogFactor = whiteCompliment( exp2( - fogDensity * fogDensity * depth * depth * LOG2 ) );\n\n\t#else\n\n\t\tfloat fogFactor = smoothstep( fogNear, fogFar, depth );\n\n\t#endif\n\t\n\toutgoingLight = mix( outgoingLight, fogColor, fogFactor );\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/fog_pars_fragment.glsl
+
+THREE.ShaderChunk[ 'fog_pars_fragment' ] ="#ifdef USE_FOG\n\n\tuniform vec3 fogColor;\n\n\t#ifdef FOG_EXP2\n\n\t\tuniform float fogDensity;\n\n\t#else\n\n\t\tuniform float fogNear;\n\t\tuniform float fogFar;\n\t#endif\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/hemilight_fragment.glsl
+
+THREE.ShaderChunk[ 'hemilight_fragment' ] ="#if MAX_HEMI_LIGHTS > 0\n\n\tfor ( int i = 0; i < MAX_HEMI_LIGHTS; i ++ ) {\n\n\t\tvec3 lightDir = hemisphereLightDirection[ i ];\n\n\t\tfloat dotProduct = dot( normal, lightDir );\n\n\t\tfloat hemiDiffuseWeight = 0.5 * dotProduct + 0.5;\n\n\t\tvec3 lightColor = mix( hemisphereLightGroundColor[ i ], hemisphereLightSkyColor[ i ], hemiDiffuseWeight );\n\n\t\ttotalAmbientLight += lightColor;\n\n\t}\n\n#endif\n\n";
+
+// File:src/renderers/shaders/ShaderChunk/lightmap_fragment.glsl
+
+THREE.ShaderChunk[ 'lightmap_fragment' ] ="#ifdef USE_LIGHTMAP\n\n\ttotalAmbientLight += texture2D( lightMap, vUv2 ).xyz * lightMapIntensity;\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/lightmap_pars_fragment.glsl
+
+THREE.ShaderChunk[ 'lightmap_pars_fragment' ] ="#ifdef USE_LIGHTMAP\n\n\tuniform sampler2D lightMap;\n\tuniform float lightMapIntensity;\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/lights_lambert_pars_vertex.glsl
+
+THREE.ShaderChunk[ 'lights_lambert_pars_vertex' ] ="#if MAX_DIR_LIGHTS > 0\n\n\tuniform vec3 directionalLightColor[ MAX_DIR_LIGHTS ];\n\tuniform vec3 directionalLightDirection[ MAX_DIR_LIGHTS ];\n\n#endif\n\n#if MAX_HEMI_LIGHTS > 0\n\n\tuniform vec3 hemisphereLightSkyColor[ MAX_HEMI_LIGHTS ];\n\tuniform vec3 hemisphereLightGroundColor[ MAX_HEMI_LIGHTS ];\n\tuniform vec3 hemisphereLightDirection[ MAX_HEMI_LIGHTS ];\n\n#endif\n\n#if MAX_POINT_LIGHTS > 0\n\n\tuniform vec3 pointLightColor[ MAX_POINT_LIGHTS ];\n\tuniform vec3 pointLightPosition[ MAX_POINT_LIGHTS ];\n\tuniform float pointLightDistance[ MAX_POINT_LIGHTS ];\n\tuniform float pointLightDecay[ MAX_POINT_LIGHTS ];\n\n#endif\n\n#if MAX_SPOT_LIGHTS > 0\n\n\tuniform vec3 spotLightColor[ MAX_SPOT_LIGHTS ];\n\tuniform vec3 spotLightPosition[ MAX_SPOT_LIGHTS ];\n\tuniform vec3 spotLightDirection[ MAX_SPOT_LIGHTS ];\n\tuniform float spotLightDistance[ MAX_SPOT_LIGHTS ];\n\tuniform float spotLightAngleCos[ MAX_SPOT_LIGHTS ];\n\tuniform float spotLightExponent[ MAX_SPOT_LIGHTS ];\n\tuniform float spotLightDecay[ MAX_SPOT_LIGHTS ];\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/lights_lambert_vertex.glsl
+
+THREE.ShaderChunk[ 'lights_lambert_vertex' ] ="vLightFront = vec3( 0.0 );\n\n#ifdef DOUBLE_SIDED\n\n\tvLightBack = vec3( 0.0 );\n\n#endif\n\nvec3 normal = normalize( transformedNormal );\n\n#if MAX_POINT_LIGHTS > 0\n\n\tfor ( int i = 0; i < MAX_POINT_LIGHTS; i ++ ) {\n\n\t\tvec3 lightColor = pointLightColor[ i ];\n\n\t\tvec3 lVector = pointLightPosition[ i ] - mvPosition.xyz;\n\t\tvec3 lightDir = normalize( lVector );\n\n\t\t// attenuation\n\n\t\tfloat attenuation = calcLightAttenuation( length( lVector ), pointLightDistance[ i ], pointLightDecay[ i ] );\n\n\t\t// diffuse\n\n\t\tfloat dotProduct = dot( normal, lightDir );\n\n\t\tvLightFront += lightColor * attenuation * saturate( dotProduct );\n\n\t\t#ifdef DOUBLE_SIDED\n\n\t\t\tvLightBack += lightColor * attenuation * saturate( - dotProduct );\n\n\t\t#endif\n\n\t}\n\n#endif\n\n#if MAX_SPOT_LIGHTS > 0\n\n\tfor ( int i = 0; i < MAX_SPOT_LIGHTS; i ++ ) {\n\n\t\tvec3 lightColor = spotLightColor[ i ];\n\n\t\tvec3 lightPosition = spotLightPosition[ i ];\n\t\tvec3 lVector = lightPosition - mvPosition.xyz;\n\t\tvec3 lightDir = normalize( lVector );\n\n\t\tfloat spotEffect = dot( spotLightDirection[ i ], lightDir );\n\n\t\tif ( spotEffect > spotLightAngleCos[ i ] ) {\n\n\t\t\tspotEffect = saturate( pow( saturate( spotEffect ), spotLightExponent[ i ] ) );\n\n\t\t\t// attenuation\n\n\t\t\tfloat attenuation = calcLightAttenuation( length( lVector ), spotLightDistance[ i ], spotLightDecay[ i ] );\n\n\t\t\tattenuation *= spotEffect;\n\n\t\t\t// diffuse\n\n\t\t\tfloat dotProduct = dot( normal, lightDir );\n\n\t\t\tvLightFront += lightColor * attenuation * saturate( dotProduct );\n\n\t\t\t#ifdef DOUBLE_SIDED\n\n\t\t\t\tvLightBack += lightColor * attenuation * saturate( - dotProduct );\n\n\t\t\t#endif\n\n\t\t}\n\n\t}\n\n#endif\n\n#if MAX_DIR_LIGHTS > 0\n\n\tfor ( int i = 0; i < MAX_DIR_LIGHTS; i ++ ) {\n\n\t\tvec3 lightColor = directionalLightColor[ i ];\n\n\t\tvec3 lightDir = directionalLightDirection[ i ];\n\n\t\t// diffuse\n\n\t\tfloat dotProduct = dot( normal, lightDir );\n\n\t\tvLightFront += lightColor * saturate( dotProduct );\n\n\t\t#ifdef DOUBLE_SIDED\n\n\t\t\tvLightBack += lightColor * saturate( - dotProduct );\n\n\t\t#endif\n\n\t}\n\n#endif\n\n#if MAX_HEMI_LIGHTS > 0\n\n\tfor ( int i = 0; i < MAX_HEMI_LIGHTS; i ++ ) {\n\n\t\tvec3 lightDir = hemisphereLightDirection[ i ];\n\n\t\t// diffuse\n\n\t\tfloat dotProduct = dot( normal, lightDir );\n\n\t\tfloat hemiDiffuseWeight = 0.5 * dotProduct + 0.5;\n\n\t\tvLightFront += mix( hemisphereLightGroundColor[ i ], hemisphereLightSkyColor[ i ], hemiDiffuseWeight );\n\n\t\t#ifdef DOUBLE_SIDED\n\n\t\t\tfloat hemiDiffuseWeightBack = - 0.5 * dotProduct + 0.5;\n\n\t\t\tvLightBack += mix( hemisphereLightGroundColor[ i ], hemisphereLightSkyColor[ i ], hemiDiffuseWeightBack );\n\n\t\t#endif\n\n\t}\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/lights_phong_fragment.glsl
+
+THREE.ShaderChunk[ 'lights_phong_fragment' ] ="vec3 viewDir = normalize( vViewPosition );\n\nvec3 totalDiffuseLight = vec3( 0.0 );\nvec3 totalSpecularLight = vec3( 0.0 );\n\n#if MAX_POINT_LIGHTS > 0\n\n\tfor ( int i = 0; i < MAX_POINT_LIGHTS; i ++ ) {\n\n\t\tvec3 lightColor = pointLightColor[ i ];\n\n\t\tvec3 lightPosition = pointLightPosition[ i ];\n\t\tvec3 lVector = lightPosition + vViewPosition.xyz;\n\t\tvec3 lightDir = normalize( lVector );\n\n\t\t// attenuation\n\n\t\tfloat attenuation = calcLightAttenuation( length( lVector ), pointLightDistance[ i ], pointLightDecay[ i ] );\n\n\t\t// diffuse\n\n\t\tfloat cosineTerm = saturate( dot( normal, lightDir ) );\n\n\t\ttotalDiffuseLight += lightColor * attenuation * cosineTerm;\n\n\t\t// specular\n\n\t\tvec3 brdf = BRDF_BlinnPhong( specular, shininess, normal, lightDir, viewDir );\n\n\t\ttotalSpecularLight += brdf * specularStrength * lightColor * attenuation * cosineTerm;\n\n\n\t}\n\n#endif\n\n#if MAX_SPOT_LIGHTS > 0\n\n\tfor ( int i = 0; i < MAX_SPOT_LIGHTS; i ++ ) {\n\n\t\tvec3 lightColor = spotLightColor[ i ];\n\n\t\tvec3 lightPosition = spotLightPosition[ i ];\n\t\tvec3 lVector = lightPosition + vViewPosition.xyz;\n\t\tvec3 lightDir = normalize( lVector );\n\n\t\tfloat spotEffect = dot( spotLightDirection[ i ], lightDir );\n\n\t\tif ( spotEffect > spotLightAngleCos[ i ] ) {\n\n\t\t\tspotEffect = saturate( pow( saturate( spotEffect ), spotLightExponent[ i ] ) );\n\n\t\t\t// attenuation\n\n\t\t\tfloat attenuation = calcLightAttenuation( length( lVector ), spotLightDistance[ i ], spotLightDecay[ i ] );\n\n\t\t\tattenuation *= spotEffect;\n\n\t\t\t// diffuse\n\n\t\t\tfloat cosineTerm = saturate( dot( normal, lightDir ) );\n\n\t\t\ttotalDiffuseLight += lightColor * attenuation * cosineTerm;\n\n\t\t\t// specular\n\n\t\t\tvec3 brdf = BRDF_BlinnPhong( specular, shininess, normal, lightDir, viewDir );\n\n\t\t\ttotalSpecularLight += brdf * specularStrength * lightColor * attenuation * cosineTerm;\n\n\t\t}\n\n\t}\n\n#endif\n\n#if MAX_DIR_LIGHTS > 0\n\n\tfor ( int i = 0; i < MAX_DIR_LIGHTS; i ++ ) {\n\n\t\tvec3 lightColor = directionalLightColor[ i ];\n\n\t\tvec3 lightDir = directionalLightDirection[ i ];\n\n\t\t// diffuse\n\n\t\tfloat cosineTerm = saturate( dot( normal, lightDir ) );\n\n\t\ttotalDiffuseLight += lightColor * cosineTerm;\n\n\t\t// specular\n\n\t\tvec3 brdf = BRDF_BlinnPhong( specular, shininess, normal, lightDir, viewDir );\n\n\t\ttotalSpecularLight += brdf * specularStrength * lightColor * cosineTerm;\n\n\t}\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/lights_phong_pars_fragment.glsl
+
+THREE.ShaderChunk[ 'lights_phong_pars_fragment' ] ="uniform vec3 ambientLightColor;\n\n#if MAX_DIR_LIGHTS > 0\n\n\tuniform vec3 directionalLightColor[ MAX_DIR_LIGHTS ];\n\tuniform vec3 directionalLightDirection[ MAX_DIR_LIGHTS ];\n\n#endif\n\n#if MAX_HEMI_LIGHTS > 0\n\n\tuniform vec3 hemisphereLightSkyColor[ MAX_HEMI_LIGHTS ];\n\tuniform vec3 hemisphereLightGroundColor[ MAX_HEMI_LIGHTS ];\n\tuniform vec3 hemisphereLightDirection[ MAX_HEMI_LIGHTS ];\n\n#endif\n\n#if MAX_POINT_LIGHTS > 0\n\n\tuniform vec3 pointLightColor[ MAX_POINT_LIGHTS ];\n\n\tuniform vec3 pointLightPosition[ MAX_POINT_LIGHTS ];\n\tuniform float pointLightDistance[ MAX_POINT_LIGHTS ];\n\tuniform float pointLightDecay[ MAX_POINT_LIGHTS ];\n\n#endif\n\n#if MAX_SPOT_LIGHTS > 0\n\n\tuniform vec3 spotLightColor[ MAX_SPOT_LIGHTS ];\n\tuniform vec3 spotLightPosition[ MAX_SPOT_LIGHTS ];\n\tuniform vec3 spotLightDirection[ MAX_SPOT_LIGHTS ];\n\tuniform float spotLightAngleCos[ MAX_SPOT_LIGHTS ];\n\tuniform float spotLightExponent[ MAX_SPOT_LIGHTS ];\n\tuniform float spotLightDistance[ MAX_SPOT_LIGHTS ];\n\tuniform float spotLightDecay[ MAX_SPOT_LIGHTS ];\n\n#endif\n\n#if MAX_SPOT_LIGHTS > 0 || defined( USE_ENVMAP )\n\n\tvarying vec3 vWorldPosition;\n\n#endif\n\nvarying vec3 vViewPosition;\n\n#ifndef FLAT_SHADED\n\n\tvarying vec3 vNormal;\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/lights_phong_pars_vertex.glsl
+
+THREE.ShaderChunk[ 'lights_phong_pars_vertex' ] ="#if MAX_SPOT_LIGHTS > 0 || defined( USE_ENVMAP )\n\n\tvarying vec3 vWorldPosition;\n\n#endif\n\n#if MAX_POINT_LIGHTS > 0\n\n\tuniform vec3 pointLightPosition[ MAX_POINT_LIGHTS ];\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/lights_phong_vertex.glsl
+
+THREE.ShaderChunk[ 'lights_phong_vertex' ] ="#if MAX_SPOT_LIGHTS > 0 || defined( USE_ENVMAP )\n\n\tvWorldPosition = worldPosition.xyz;\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/linear_to_gamma_fragment.glsl
+
+THREE.ShaderChunk[ 'linear_to_gamma_fragment' ] ="\n\toutgoingLight = linearToOutput( outgoingLight );\n";
+
+// File:src/renderers/shaders/ShaderChunk/logdepthbuf_fragment.glsl
+
+THREE.ShaderChunk[ 'logdepthbuf_fragment' ] ="#if defined(USE_LOGDEPTHBUF) && defined(USE_LOGDEPTHBUF_EXT)\n\n\tgl_FragDepthEXT = log2(vFragDepth) * logDepthBufFC * 0.5;\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/logdepthbuf_pars_fragment.glsl
+
+THREE.ShaderChunk[ 'logdepthbuf_pars_fragment' ] ="#ifdef USE_LOGDEPTHBUF\n\n\tuniform float logDepthBufFC;\n\n\t#ifdef USE_LOGDEPTHBUF_EXT\n\n\t\tvarying float vFragDepth;\n\n\t#endif\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/logdepthbuf_pars_vertex.glsl
+
+THREE.ShaderChunk[ 'logdepthbuf_pars_vertex' ] ="#ifdef USE_LOGDEPTHBUF\n\n\t#ifdef USE_LOGDEPTHBUF_EXT\n\n\t\tvarying float vFragDepth;\n\n\t#endif\n\n\tuniform float logDepthBufFC;\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/logdepthbuf_vertex.glsl
+
+THREE.ShaderChunk[ 'logdepthbuf_vertex' ] ="#ifdef USE_LOGDEPTHBUF\n\n\tgl_Position.z = log2(max( EPSILON, gl_Position.w + 1.0 )) * logDepthBufFC;\n\n\t#ifdef USE_LOGDEPTHBUF_EXT\n\n\t\tvFragDepth = 1.0 + gl_Position.w;\n\n#else\n\n\t\tgl_Position.z = (gl_Position.z - 1.0) * gl_Position.w;\n\n\t#endif\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/map_fragment.glsl
+
+THREE.ShaderChunk[ 'map_fragment' ] ="#ifdef USE_MAP\n\n\tvec4 texelColor = texture2D( map, vUv );\n\n\ttexelColor.xyz = inputToLinear( texelColor.xyz );\n\n\tdiffuseColor *= texelColor;\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/map_pars_fragment.glsl
+
+THREE.ShaderChunk[ 'map_pars_fragment' ] ="#ifdef USE_MAP\n\n\tuniform sampler2D map;\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/map_particle_fragment.glsl
+
+THREE.ShaderChunk[ 'map_particle_fragment' ] ="#ifdef USE_MAP\n\n\tdiffuseColor *= texture2D( map, vec2( gl_PointCoord.x, 1.0 - gl_PointCoord.y ) * offsetRepeat.zw + offsetRepeat.xy );\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/map_particle_pars_fragment.glsl
+
+THREE.ShaderChunk[ 'map_particle_pars_fragment' ] ="#ifdef USE_MAP\n\n\tuniform vec4 offsetRepeat;\n\tuniform sampler2D map;\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/morphnormal_vertex.glsl
+
+THREE.ShaderChunk[ 'morphnormal_vertex' ] ="#ifdef USE_MORPHNORMALS\n\n\tobjectNormal += ( morphNormal0 - normal ) * morphTargetInfluences[ 0 ];\n\tobjectNormal += ( morphNormal1 - normal ) * morphTargetInfluences[ 1 ];\n\tobjectNormal += ( morphNormal2 - normal ) * morphTargetInfluences[ 2 ];\n\tobjectNormal += ( morphNormal3 - normal ) * morphTargetInfluences[ 3 ];\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/morphtarget_pars_vertex.glsl
+
+THREE.ShaderChunk[ 'morphtarget_pars_vertex' ] ="#ifdef USE_MORPHTARGETS\n\n\t#ifndef USE_MORPHNORMALS\n\n\tuniform float morphTargetInfluences[ 8 ];\n\n\t#else\n\n\tuniform float morphTargetInfluences[ 4 ];\n\n\t#endif\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/morphtarget_vertex.glsl
+
+THREE.ShaderChunk[ 'morphtarget_vertex' ] ="#ifdef USE_MORPHTARGETS\n\n\ttransformed += ( morphTarget0 - position ) * morphTargetInfluences[ 0 ];\n\ttransformed += ( morphTarget1 - position ) * morphTargetInfluences[ 1 ];\n\ttransformed += ( morphTarget2 - position ) * morphTargetInfluences[ 2 ];\n\ttransformed += ( morphTarget3 - position ) * morphTargetInfluences[ 3 ];\n\n\t#ifndef USE_MORPHNORMALS\n\n\ttransformed += ( morphTarget4 - position ) * morphTargetInfluences[ 4 ];\n\ttransformed += ( morphTarget5 - position ) * morphTargetInfluences[ 5 ];\n\ttransformed += ( morphTarget6 - position ) * morphTargetInfluences[ 6 ];\n\ttransformed += ( morphTarget7 - position ) * morphTargetInfluences[ 7 ];\n\n\t#endif\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/normal_phong_fragment.glsl
+
+THREE.ShaderChunk[ 'normal_phong_fragment' ] ="#ifndef FLAT_SHADED\n\n\tvec3 normal = normalize( vNormal );\n\n\t#ifdef DOUBLE_SIDED\n\n\t\tnormal = normal * ( -1.0 + 2.0 * float( gl_FrontFacing ) );\n\n\t#endif\n\n#else\n\n\tvec3 fdx = dFdx( vViewPosition );\n\tvec3 fdy = dFdy( vViewPosition );\n\tvec3 normal = normalize( cross( fdx, fdy ) );\n\n#endif\n\n#ifdef USE_NORMALMAP\n\n\tnormal = perturbNormal2Arb( -vViewPosition, normal );\n\n#elif defined( USE_BUMPMAP )\n\n\tnormal = perturbNormalArb( -vViewPosition, normal, dHdxy_fwd() );\n\n#endif\n\n";
+
+// File:src/renderers/shaders/ShaderChunk/normalmap_pars_fragment.glsl
+
+THREE.ShaderChunk[ 'normalmap_pars_fragment' ] ="#ifdef USE_NORMALMAP\n\n\tuniform sampler2D normalMap;\n\tuniform vec2 normalScale;\n\n\t// Per-Pixel Tangent Space Normal Mapping\n\t// http://hacksoflife.blogspot.ch/2009/11/per-pixel-tangent-space-normal-mapping.html\n\n\tvec3 perturbNormal2Arb( vec3 eye_pos, vec3 surf_norm ) {\n\n\t\tvec3 q0 = dFdx( eye_pos.xyz );\n\t\tvec3 q1 = dFdy( eye_pos.xyz );\n\t\tvec2 st0 = dFdx( vUv.st );\n\t\tvec2 st1 = dFdy( vUv.st );\n\n\t\tvec3 S = normalize( q0 * st1.t - q1 * st0.t );\n\t\tvec3 T = normalize( -q0 * st1.s + q1 * st0.s );\n\t\tvec3 N = normalize( surf_norm );\n\n\t\tvec3 mapN = texture2D( normalMap, vUv ).xyz * 2.0 - 1.0;\n\t\tmapN.xy = normalScale * mapN.xy;\n\t\tmat3 tsn = mat3( S, T, N );\n\t\treturn normalize( tsn * mapN );\n\n\t}\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/project_vertex.glsl
+
+THREE.ShaderChunk[ 'project_vertex' ] ="#ifdef USE_SKINNING\n\n\tvec4 mvPosition = modelViewMatrix * skinned;\n\n#else\n\n\tvec4 mvPosition = modelViewMatrix * vec4( transformed, 1.0 );\n\n#endif\n\ngl_Position = projectionMatrix * mvPosition;\n";
+
+// File:src/renderers/shaders/ShaderChunk/shadowmap_fragment.glsl
+
+THREE.ShaderChunk[ 'shadowmap_fragment' ] ="#ifdef USE_SHADOWMAP\n\n\tfor ( int i = 0; i < MAX_SHADOWS; i ++ ) {\n\n\t\tfloat texelSizeY =  1.0 / shadowMapSize[ i ].y;\n\n\t\tfloat shadow = 0.0;\n\n#if defined( POINT_LIGHT_SHADOWS )\n\n\t\t// to save on uniform space, we use the sign of @shadowDarkness[ i ] to determine\n\t\t// whether or not this light is a point light ( shadowDarkness[ i ] < 0 == point light)\n\t\tbool isPointLight = shadowDarkness[ i ] < 0.0;\n\n\t\tif ( isPointLight ) {\n\n\t\t\t// get the real shadow darkness\n\t\t\tfloat realShadowDarkness = abs( shadowDarkness[ i ] );\n\n\t\t\t// for point lights, the uniform @vShadowCoord is re-purposed to hold\n\t\t\t// the distance from the light to the world-space position of the fragment.\n\t\t\tvec3 lightToPosition = vShadowCoord[ i ].xyz;\n\n\t#if defined( SHADOWMAP_TYPE_PCF ) || defined( SHADOWMAP_TYPE_PCF_SOFT )\n\n\t\t\t// bd3D = base direction 3D\n\t\t\tvec3 bd3D = normalize( lightToPosition );\n\t\t\t// dp = distance from light to fragment position\n\t\t\tfloat dp = length( lightToPosition );\n\n\t\t\t// base measurement\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D, texelSizeY ) ), shadowBias[ i ], shadow );\n\n\t\t\t// Dr = disk radius\n\n\t#if defined( SHADOWMAP_TYPE_PCF )\n\t\t\tconst float Dr = 1.25;\n\t#elif defined( SHADOWMAP_TYPE_PCF_SOFT )\n\t\t\tconst float Dr = 2.25;\n\t#endif\n\n\t\t\t// os = offset scale\n\t\t\tfloat os = Dr *  2.0 * texelSizeY;\n\n\t\t\tconst vec3 Gsd = vec3( - 1, 0, 1 );\n\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.zzz * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.zxz * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.xxz * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.xzz * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.zzx * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.zxx * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.xxx * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.xzx * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.zzy * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.zxy * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.xxy * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.xzy * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.zyz * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.xyz * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.zyx * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.xyx * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.yzz * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.yxz * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.yxx * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D + Gsd.yzx * os, texelSizeY ) ), shadowBias[ i ], shadow );\n\n\t\t\tshadow *= realShadowDarkness * ( 1.0 / 21.0 );\n\n\t#else // no percentage-closer filtering:\n\n\t\t\tvec3 bd3D = normalize( lightToPosition );\n\t\t\tfloat dp = length( lightToPosition );\n\n\t\t\tadjustShadowValue1K( dp, texture2D( shadowMap[ i ], cubeToUV( bd3D, texelSizeY ) ), shadowBias[ i ], shadow );\n\n\t\t\tshadow *= realShadowDarkness;\n\n\t#endif\n\n\t\t} else {\n\n#endif // POINT_LIGHT_SHADOWS\n\n\t\t\tfloat texelSizeX =  1.0 / shadowMapSize[ i ].x;\n\n\t\t\tvec3 shadowCoord = vShadowCoord[ i ].xyz / vShadowCoord[ i ].w;\n\n\t\t\t// if ( something && something ) breaks ATI OpenGL shader compiler\n\t\t\t// if ( all( something, something ) ) using this instead\n\n\t\t\tbvec4 inFrustumVec = bvec4 ( shadowCoord.x >= 0.0, shadowCoord.x <= 1.0, shadowCoord.y >= 0.0, shadowCoord.y <= 1.0 );\n\t\t\tbool inFrustum = all( inFrustumVec );\n\n\t\t\tbvec2 frustumTestVec = bvec2( inFrustum, shadowCoord.z <= 1.0 );\n\n\t\t\tbool frustumTest = all( frustumTestVec );\n\n\t\t\tif ( frustumTest ) {\n\n\t#if defined( SHADOWMAP_TYPE_PCF )\n\n\t\t\t\t// Percentage-close filtering\n\t\t\t\t// (9 pixel kernel)\n\t\t\t\t// http://fabiensanglard.net/shadowmappingPCF/\n\n\t\t\t\t/*\n\t\t\t\t\t\t// nested loops breaks shader compiler / validator on some ATI cards when using OpenGL\n\t\t\t\t\t\t// must enroll loop manually\n\t\t\t\t\tfor ( float y = -1.25; y <= 1.25; y += 1.25 )\n\t\t\t\t\t\tfor ( float x = -1.25; x <= 1.25; x += 1.25 ) {\n\t\t\t\t\t\t\tvec4 rgbaDepth = texture2D( shadowMap[ i ], vec2( x * xPixelOffset, y * yPixelOffset ) + shadowCoord.xy );\n\t\t\t\t\t\t\t\t\t// doesn't seem to produce any noticeable visual difference compared to simple texture2D lookup\n\t\t\t\t\t\t\t\t\t//vec4 rgbaDepth = texture2DProj( shadowMap[ i ], vec4( vShadowCoord[ i ].w * ( vec2( x * xPixelOffset, y * yPixelOffset ) + shadowCoord.xy ), 0.05, vShadowCoord[ i ].w ) );\n\t\t\t\t\t\t\tfloat fDepth = unpackDepth( rgbaDepth );\n\t\t\t\t\t\t\tif ( fDepth < shadowCoord.z )\n\t\t\t\t\t\t\t\tshadow += 1.0;\n\t\t\t\t\t}\n\t\t\t\t\tshadow /= 9.0;\n\t\t\t\t*/\n\n\t\t\t\tshadowCoord.z += shadowBias[ i ];\n\n\t\t\t\tconst float ShadowDelta = 1.0 / 9.0;\n\n\t\t\t\tfloat xPixelOffset = texelSizeX;\n\t\t\t\tfloat yPixelOffset = texelSizeY;\n\n\t\t\t\tfloat dx0 = - 1.25 * xPixelOffset;\n\t\t\t\tfloat dy0 = - 1.25 * yPixelOffset;\n\t\t\t\tfloat dx1 = 1.25 * xPixelOffset;\n\t\t\t\tfloat dy1 = 1.25 * yPixelOffset;\n\n\t\t\t\tfloat fDepth = unpackDepth( texture2D( shadowMap[ i ], shadowCoord.xy + vec2( dx0, dy0 ) ) );\n\t\t\t\tif ( fDepth < shadowCoord.z ) shadow += ShadowDelta;\n\n\t\t\t\tfDepth = unpackDepth( texture2D( shadowMap[ i ], shadowCoord.xy + vec2( 0.0, dy0 ) ) );\n\t\t\t\tif ( fDepth < shadowCoord.z ) shadow += ShadowDelta;\n\n\t\t\t\tfDepth = unpackDepth( texture2D( shadowMap[ i ], shadowCoord.xy + vec2( dx1, dy0 ) ) );\n\t\t\t\tif ( fDepth < shadowCoord.z ) shadow += ShadowDelta;\n\n\t\t\t\tfDepth = unpackDepth( texture2D( shadowMap[ i ], shadowCoord.xy + vec2( dx0, 0.0 ) ) );\n\t\t\t\tif ( fDepth < shadowCoord.z ) shadow += ShadowDelta;\n\n\t\t\t\tfDepth = unpackDepth( texture2D( shadowMap[ i ], shadowCoord.xy ) );\n\t\t\t\tif ( fDepth < shadowCoord.z ) shadow += ShadowDelta;\n\n\t\t\t\tfDepth = unpackDepth( texture2D( shadowMap[ i ], shadowCoord.xy + vec2( dx1, 0.0 ) ) );\n\t\t\t\tif ( fDepth < shadowCoord.z ) shadow += ShadowDelta;\n\n\t\t\t\tfDepth = unpackDepth( texture2D( shadowMap[ i ], shadowCoord.xy + vec2( dx0, dy1 ) ) );\n\t\t\t\tif ( fDepth < shadowCoord.z ) shadow += ShadowDelta;\n\n\t\t\t\tfDepth = unpackDepth( texture2D( shadowMap[ i ], shadowCoord.xy + vec2( 0.0, dy1 ) ) );\n\t\t\t\tif ( fDepth < shadowCoord.z ) shadow += ShadowDelta;\n\n\t\t\t\tfDepth = unpackDepth( texture2D( shadowMap[ i ], shadowCoord.xy + vec2( dx1, dy1 ) ) );\n\t\t\t\tif ( fDepth < shadowCoord.z ) shadow += ShadowDelta;\n\n\t\t\t\tshadow *= shadowDarkness[ i ];\n\n\t#elif defined( SHADOWMAP_TYPE_PCF_SOFT )\n\n\t\t\t\t// Percentage-close filtering\n\t\t\t\t// (9 pixel kernel)\n\t\t\t\t// http://fabiensanglard.net/shadowmappingPCF/\n\n\t\t\t\tshadowCoord.z += shadowBias[ i ];\n\n\t\t\t\tfloat xPixelOffset = texelSizeX;\n\t\t\t\tfloat yPixelOffset = texelSizeY;\n\n\t\t\t\tfloat dx0 = - 1.0 * xPixelOffset;\n\t\t\t\tfloat dy0 = - 1.0 * yPixelOffset;\n\t\t\t\tfloat dx1 = 1.0 * xPixelOffset;\n\t\t\t\tfloat dy1 = 1.0 * yPixelOffset;\n\n\t\t\t\tmat3 shadowKernel;\n\t\t\t\tmat3 depthKernel;\n\n\t\t\t\tdepthKernel[ 0 ][ 0 ] = unpackDepth( texture2D( shadowMap[ i ], shadowCoord.xy + vec2( dx0, dy0 ) ) );\n\t\t\t\tdepthKernel[ 0 ][ 1 ] = unpackDepth( texture2D( shadowMap[ i ], shadowCoord.xy + vec2( dx0, 0.0 ) ) );\n\t\t\t\tdepthKernel[ 0 ][ 2 ] = unpackDepth( texture2D( shadowMap[ i ], shadowCoord.xy + vec2( dx0, dy1 ) ) );\n\t\t\t\tdepthKernel[ 1 ][ 0 ] = unpackDepth( texture2D( shadowMap[ i ], shadowCoord.xy + vec2( 0.0, dy0 ) ) );\n\t\t\t\tdepthKernel[ 1 ][ 1 ] = unpackDepth( texture2D( shadowMap[ i ], shadowCoord.xy ) );\n\t\t\t\tdepthKernel[ 1 ][ 2 ] = unpackDepth( texture2D( shadowMap[ i ], shadowCoord.xy + vec2( 0.0, dy1 ) ) );\n\t\t\t\tdepthKernel[ 2 ][ 0 ] = unpackDepth( texture2D( shadowMap[ i ], shadowCoord.xy + vec2( dx1, dy0 ) ) );\n\t\t\t\tdepthKernel[ 2 ][ 1 ] = unpackDepth( texture2D( shadowMap[ i ], shadowCoord.xy + vec2( dx1, 0.0 ) ) );\n\t\t\t\tdepthKernel[ 2 ][ 2 ] = unpackDepth( texture2D( shadowMap[ i ], shadowCoord.xy + vec2( dx1, dy1 ) ) );\n\n\t\t\t\tvec3 shadowZ = vec3( shadowCoord.z );\n\t\t\t\tshadowKernel[ 0 ] = vec3( lessThan( depthKernel[ 0 ], shadowZ ) );\n\t\t\t\tshadowKernel[ 0 ] *= vec3( 0.25 );\n\n\t\t\t\tshadowKernel[ 1 ] = vec3( lessThan( depthKernel[ 1 ], shadowZ ) );\n\t\t\t\tshadowKernel[ 1 ] *= vec3( 0.25 );\n\n\t\t\t\tshadowKernel[ 2 ] = vec3( lessThan( depthKernel[ 2 ], shadowZ ) );\n\t\t\t\tshadowKernel[ 2 ] *= vec3( 0.25 );\n\n\t\t\t\tvec2 fractionalCoord = 1.0 - fract( shadowCoord.xy * shadowMapSize[ i ].xy );\n\n\t\t\t\tshadowKernel[ 0 ] = mix( shadowKernel[ 1 ], shadowKernel[ 0 ], fractionalCoord.x );\n\t\t\t\tshadowKernel[ 1 ] = mix( shadowKernel[ 2 ], shadowKernel[ 1 ], fractionalCoord.x );\n\n\t\t\t\tvec4 shadowValues;\n\t\t\t\tshadowValues.x = mix( shadowKernel[ 0 ][ 1 ], shadowKernel[ 0 ][ 0 ], fractionalCoord.y );\n\t\t\t\tshadowValues.y = mix( shadowKernel[ 0 ][ 2 ], shadowKernel[ 0 ][ 1 ], fractionalCoord.y );\n\t\t\t\tshadowValues.z = mix( shadowKernel[ 1 ][ 1 ], shadowKernel[ 1 ][ 0 ], fractionalCoord.y );\n\t\t\t\tshadowValues.w = mix( shadowKernel[ 1 ][ 2 ], shadowKernel[ 1 ][ 1 ], fractionalCoord.y );\n\n\t\t\t\tshadow = dot( shadowValues, vec4( 1.0 ) ) * shadowDarkness[ i ];\n\n\t#else // no percentage-closer filtering:\n\n\t\t\t\tshadowCoord.z += shadowBias[ i ];\n\n\t\t\t\tvec4 rgbaDepth = texture2D( shadowMap[ i ], shadowCoord.xy );\n\t\t\t\tfloat fDepth = unpackDepth( rgbaDepth );\n\n\t\t\t\tif ( fDepth < shadowCoord.z )\n\t\t\t\t\tshadow = shadowDarkness[ i ];\n\n\t#endif\n\n\t\t\t}\n\n#ifdef SHADOWMAP_DEBUG\n\n\t\t\tif ( inFrustum ) {\n\n\t\t\t\tif ( i == 0 ) {\n\n\t\t\t\t\toutgoingLight *= vec3( 1.0, 0.5, 0.0 );\n\n\t\t\t\t} else if ( i == 1 ) {\n\n\t\t\t\t\toutgoingLight *= vec3( 0.0, 1.0, 0.8 );\n\n\t\t\t\t} else {\n\n\t\t\t\t\toutgoingLight *= vec3( 0.0, 0.5, 1.0 );\n\n\t\t\t\t}\n\n\t\t\t}\n\n#endif\n\n#if defined( POINT_LIGHT_SHADOWS )\n\n\t\t}\n\n#endif\n\n\t\tshadowMask = shadowMask * vec3( 1.0 - shadow );\n\n\t}\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/shadowmap_pars_fragment.glsl
+
+THREE.ShaderChunk[ 'shadowmap_pars_fragment' ] ="#ifdef USE_SHADOWMAP\n\n\tuniform sampler2D shadowMap[ MAX_SHADOWS ];\n\tuniform vec2 shadowMapSize[ MAX_SHADOWS ];\n\n\tuniform float shadowDarkness[ MAX_SHADOWS ];\n\tuniform float shadowBias[ MAX_SHADOWS ];\n\n\tvarying vec4 vShadowCoord[ MAX_SHADOWS ];\n\n\tfloat unpackDepth( const in vec4 rgba_depth ) {\n\n\t\tconst vec4 bit_shift = vec4( 1.0 / ( 256.0 * 256.0 * 256.0 ), 1.0 / ( 256.0 * 256.0 ), 1.0 / 256.0, 1.0 );\n\t\tfloat depth = dot( rgba_depth, bit_shift );\n\t\treturn depth;\n\n\t}\n\n\t#if defined(POINT_LIGHT_SHADOWS)\n\n\t\t// adjustShadowValue1K() upacks the depth value stored in @textureData, adds @bias to it, and then\n\t\t// comapres the result with @testDepth. If @testDepth is larger than or equal to that result, then\n\t\t// @shadowValue is incremented by 1.0.\n\n\t\tvoid adjustShadowValue1K( const float testDepth, const vec4 textureData, const float bias, inout float shadowValue ) {\n\n\t\t\tconst vec4 bitSh = vec4( 1.0 / ( 256.0 * 256.0 * 256.0 ), 1.0 / ( 256.0 * 256.0 ), 1.0 / 256.0, 1.0 );\n\t\t\tif ( testDepth >= dot( textureData, bitSh ) * 1000.0 + bias )\n\t\t\t\tshadowValue += 1.0;\n\n\t\t}\n\n\t\t// cubeToUV() maps a 3D direction vector suitable for cube texture mapping to a 2D\n\t\t// vector suitable for 2D texture mapping. This code uses the following layout for the\n\t\t// 2D texture:\n\t\t//\n\t\t// xzXZ\n\t\t//  y Y\n\t\t//\n\t\t// Y - Positive y direction\n\t\t// y - Negative y direction\n\t\t// X - Positive x direction\n\t\t// x - Negative x direction\n\t\t// Z - Positive z direction\n\t\t// z - Negative z direction\n\t\t//\n\t\t// Source and test bed:\n\t\t// https://gist.github.com/tschw/da10c43c467ce8afd0c4\n\n\t\tvec2 cubeToUV( vec3 v, float texelSizeY ) {\n\n\t\t\t// Number of texels to avoid at the edge of each square\n\n\t\t\tvec3 absV = abs( v );\n\n\t\t\t// Intersect unit cube\n\n\t\t\tfloat scaleToCube = 1.0 / max( absV.x, max( absV.y, absV.z ) );\n\t\t\tabsV *= scaleToCube;\n\n\t\t\t// Apply scale to avoid seams\n\n\t\t\t// two texels less per square (one texel will do for NEAREST)\n\t\t\tv *= scaleToCube * ( 1.0 - 2.0 * texelSizeY );\n\n\t\t\t// Unwrap\n\n\t\t\t// space: -1 ... 1 range for each square\n\t\t\t//\n\t\t\t// #X##\t\tdim    := ( 4 , 2 )\n\t\t\t//  # #\t\tcenter := ( 1 , 1 )\n\n\t\t\tvec2 planar = v.xy;\n\n\t\t\tfloat almostATexel = 1.5 * texelSizeY;\n\t\t\tfloat almostOne = 1.0 - almostATexel;\n\n\t\t\tif ( absV.z >= almostOne ) {\n\n\t\t\t\tif ( v.z > 0.0 )\n\t\t\t\t\tplanar.x = 4.0 - v.x;\n\n\t\t\t} else if ( absV.x >= almostOne ) {\n\n\t\t\t\tfloat signX = sign( v.x );\n\t\t\t\tplanar.x = v.z * signX + 2.0 * signX;\n\n\t\t\t} else if ( absV.y >= almostOne ) {\n\n\t\t\t\tfloat signY = sign( v.y );\n\t\t\t\tplanar.x = v.x + 2.0 * signY + 2.0;\n\t\t\t\tplanar.y = v.z * signY - 2.0;\n\n\t\t\t}\n\n\t\t\t// Transform to UV space\n\n\t\t\t// scale := 0.5 / dim\n\t\t\t// translate := ( center + 0.5 ) / dim\n\t\t\treturn vec2( 0.125, 0.25 ) * planar + vec2( 0.375, 0.75 );\n\n\t\t}\n\n\t#endif\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/shadowmap_pars_vertex.glsl
+
+THREE.ShaderChunk[ 'shadowmap_pars_vertex' ] ="#ifdef USE_SHADOWMAP\n\n\tuniform float shadowDarkness[ MAX_SHADOWS ];\n\tuniform mat4 shadowMatrix[ MAX_SHADOWS ];\n\tvarying vec4 vShadowCoord[ MAX_SHADOWS ];\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/shadowmap_vertex.glsl
+
+THREE.ShaderChunk[ 'shadowmap_vertex' ] ="#ifdef USE_SHADOWMAP\n\n\tfor ( int i = 0; i < MAX_SHADOWS; i ++ ) {\n\n\t\t\tvShadowCoord[ i ] = shadowMatrix[ i ] * worldPosition;\n\n\t}\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/skinbase_vertex.glsl
+
+THREE.ShaderChunk[ 'skinbase_vertex' ] ="#ifdef USE_SKINNING\n\n\tmat4 boneMatX = getBoneMatrix( skinIndex.x );\n\tmat4 boneMatY = getBoneMatrix( skinIndex.y );\n\tmat4 boneMatZ = getBoneMatrix( skinIndex.z );\n\tmat4 boneMatW = getBoneMatrix( skinIndex.w );\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/skinning_pars_vertex.glsl
+
+THREE.ShaderChunk[ 'skinning_pars_vertex' ] ="#ifdef USE_SKINNING\n\n\tuniform mat4 bindMatrix;\n\tuniform mat4 bindMatrixInverse;\n\n\t#ifdef BONE_TEXTURE\n\n\t\tuniform sampler2D boneTexture;\n\t\tuniform int boneTextureWidth;\n\t\tuniform int boneTextureHeight;\n\n\t\tmat4 getBoneMatrix( const in float i ) {\n\n\t\t\tfloat j = i * 4.0;\n\t\t\tfloat x = mod( j, float( boneTextureWidth ) );\n\t\t\tfloat y = floor( j / float( boneTextureWidth ) );\n\n\t\t\tfloat dx = 1.0 / float( boneTextureWidth );\n\t\t\tfloat dy = 1.0 / float( boneTextureHeight );\n\n\t\t\ty = dy * ( y + 0.5 );\n\n\t\t\tvec4 v1 = texture2D( boneTexture, vec2( dx * ( x + 0.5 ), y ) );\n\t\t\tvec4 v2 = texture2D( boneTexture, vec2( dx * ( x + 1.5 ), y ) );\n\t\t\tvec4 v3 = texture2D( boneTexture, vec2( dx * ( x + 2.5 ), y ) );\n\t\t\tvec4 v4 = texture2D( boneTexture, vec2( dx * ( x + 3.5 ), y ) );\n\n\t\t\tmat4 bone = mat4( v1, v2, v3, v4 );\n\n\t\t\treturn bone;\n\n\t\t}\n\n\t#else\n\n\t\tuniform mat4 boneGlobalMatrices[ MAX_BONES ];\n\n\t\tmat4 getBoneMatrix( const in float i ) {\n\n\t\t\tmat4 bone = boneGlobalMatrices[ int(i) ];\n\t\t\treturn bone;\n\n\t\t}\n\n\t#endif\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/skinning_vertex.glsl
+
+THREE.ShaderChunk[ 'skinning_vertex' ] ="#ifdef USE_SKINNING\n\n\tvec4 skinVertex = bindMatrix * vec4( transformed, 1.0 );\n\n\tvec4 skinned = vec4( 0.0 );\n\tskinned += boneMatX * skinVertex * skinWeight.x;\n\tskinned += boneMatY * skinVertex * skinWeight.y;\n\tskinned += boneMatZ * skinVertex * skinWeight.z;\n\tskinned += boneMatW * skinVertex * skinWeight.w;\n\tskinned  = bindMatrixInverse * skinned;\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/skinnormal_vertex.glsl
+
+THREE.ShaderChunk[ 'skinnormal_vertex' ] ="#ifdef USE_SKINNING\n\n\tmat4 skinMatrix = mat4( 0.0 );\n\tskinMatrix += skinWeight.x * boneMatX;\n\tskinMatrix += skinWeight.y * boneMatY;\n\tskinMatrix += skinWeight.z * boneMatZ;\n\tskinMatrix += skinWeight.w * boneMatW;\n\tskinMatrix  = bindMatrixInverse * skinMatrix * bindMatrix;\n\n\tobjectNormal = vec4( skinMatrix * vec4( objectNormal, 0.0 ) ).xyz;\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/specularmap_fragment.glsl
+
+THREE.ShaderChunk[ 'specularmap_fragment' ] ="float specularStrength;\n\n#ifdef USE_SPECULARMAP\n\n\tvec4 texelSpecular = texture2D( specularMap, vUv );\n\tspecularStrength = texelSpecular.r;\n\n#else\n\n\tspecularStrength = 1.0;\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/specularmap_pars_fragment.glsl
+
+THREE.ShaderChunk[ 'specularmap_pars_fragment' ] ="#ifdef USE_SPECULARMAP\n\n\tuniform sampler2D specularMap;\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/uv2_pars_fragment.glsl
+
+THREE.ShaderChunk[ 'uv2_pars_fragment' ] ="#if defined( USE_LIGHTMAP ) || defined( USE_AOMAP )\n\n\tvarying vec2 vUv2;\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/uv2_pars_vertex.glsl
+
+THREE.ShaderChunk[ 'uv2_pars_vertex' ] ="#if defined( USE_LIGHTMAP ) || defined( USE_AOMAP )\n\n\tattribute vec2 uv2;\n\tvarying vec2 vUv2;\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/uv2_vertex.glsl
+
+THREE.ShaderChunk[ 'uv2_vertex' ] ="#if defined( USE_LIGHTMAP ) || defined( USE_AOMAP )\n\n\tvUv2 = uv2;\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/uv_pars_fragment.glsl
+
+THREE.ShaderChunk[ 'uv_pars_fragment' ] ="#if defined( USE_MAP ) || defined( USE_BUMPMAP ) || defined( USE_NORMALMAP ) || defined( USE_SPECULARMAP ) || defined( USE_ALPHAMAP ) || defined( USE_EMISSIVEMAP )\n\n\tvarying vec2 vUv;\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/uv_pars_vertex.glsl
+
+THREE.ShaderChunk[ 'uv_pars_vertex' ] ="#if defined( USE_MAP ) || defined( USE_BUMPMAP ) || defined( USE_NORMALMAP ) || defined( USE_SPECULARMAP ) || defined( USE_ALPHAMAP ) || defined( USE_EMISSIVEMAP )\n\n\tvarying vec2 vUv;\n\tuniform vec4 offsetRepeat;\n\n#endif\n";
+
+// File:src/renderers/shaders/ShaderChunk/uv_vertex.glsl
+
+THREE.ShaderChunk[ 'uv_vertex' ] ="#if defined( USE_MAP ) || defined( USE_BUMPMAP ) || defined( USE_NORMALMAP ) || defined( USE_SPECULARMAP ) || defined( USE_ALPHAMAP ) || defined( USE_EMISSIVEMAP )\n\n\tvUv = uv * offsetRepeat.zw + offsetRepeat.xy;\n\n#endif";
+
+// File:src/renderers/shaders/ShaderChunk/worldpos_vertex.glsl
+
+THREE.ShaderChunk[ 'worldpos_vertex' ] ="#if defined( USE_ENVMAP ) || defined( PHONG ) || defined( LAMBERT ) || defined ( USE_SHADOWMAP )\n\n\t#ifdef USE_SKINNING\n\n\t\tvec4 worldPosition = modelMatrix * skinned;\n\n\t#else\n\n\t\tvec4 worldPosition = modelMatrix * vec4( transformed, 1.0 );\n\n\t#endif\n\n#endif\n";
+
+// File:src/renderers/shaders/UniformsUtils.js
+
+/**
+ * Uniform Utilities
+ */
+
+THREE.UniformsUtils = {
+
+	merge: function ( uniforms ) {
+
+		var merged = {};
+
+		for ( var u = 0; u < uniforms.length; u ++ ) {
+
+			var tmp = this.clone( uniforms[ u ] );
+
+			for ( var p in tmp ) {
+
+				merged[ p ] = tmp[ p ];
+
+			}
+
+		}
+
+		return merged;
+
+	},
+
+	clone: function ( uniforms_src ) {
+
+		var uniforms_dst = {};
+
+		for ( var u in uniforms_src ) {
+
+			uniforms_dst[ u ] = {};
+
+			for ( var p in uniforms_src[ u ] ) {
+
+				var parameter_src = uniforms_src[ u ][ p ];
+
+				if ( parameter_src instanceof THREE.Color ||
+					 parameter_src instanceof THREE.Vector2 ||
+					 parameter_src instanceof THREE.Vector3 ||
+					 parameter_src instanceof THREE.Vector4 ||
+					 parameter_src instanceof THREE.Matrix3 ||
+					 parameter_src instanceof THREE.Matrix4 ||
+					 parameter_src instanceof THREE.Texture ) {
+
+					uniforms_dst[ u ][ p ] = parameter_src.clone();
+
+				} else if ( Array.isArray( parameter_src ) ) {
+
+					uniforms_dst[ u ][ p ] = parameter_src.slice();
+
+				} else {
+
+					uniforms_dst[ u ][ p ] = parameter_src;
+
+				}
+
+			}
+
+		}
+
+		return uniforms_dst;
+
+	}
+
+};
+
+// File:src/renderers/shaders/UniformsLib.js
+
+/**
+ * Uniforms library for shared webgl shaders
+ */
+
+THREE.UniformsLib = {
+
+	common: {
+
+		"diffuse" : { type: "c", value: new THREE.Color( 0xeeeeee ) },
+		"opacity" : { type: "f", value: 1.0 },
+
+		"map" : { type: "t", value: null },
+		"offsetRepeat" : { type: "v4", value: new THREE.Vector4( 0, 0, 1, 1 ) },
+
+		"specularMap" : { type: "t", value: null },
+		"alphaMap" : { type: "t", value: null },
+
+		"envMap" : { type: "t", value: null },
+		"flipEnvMap" : { type: "f", value: - 1 },
+		"reflectivity" : { type: "f", value: 1.0 },
+		"refractionRatio" : { type: "f", value: 0.98 }
+
+	},
+
+	aomap: {
+
+		"aoMap" : { type: "t", value: null },
+		"aoMapIntensity" : { type: "f", value: 1 },
+
+	},
+
+	lightmap: {
+
+		"lightMap" : { type: "t", value: null },
+		"lightMapIntensity" : { type: "f", value: 1 },
+
+	},
+
+	emissivemap: {
+
+		"emissiveMap" : { type: "t", value: null },
+
+	},
+
+	bumpmap: {
+
+		"bumpMap" : { type: "t", value: null },
+		"bumpScale" : { type: "f", value: 1 }
+
+	},
+
+	normalmap: {
+
+		"normalMap" : { type: "t", value: null },
+		"normalScale" : { type: "v2", value: new THREE.Vector2( 1, 1 ) }
+
+	},
+
+	displacementmap: {
+
+		"displacementMap" : { type: "t", value: null },
+		"displacementScale" : { type: "f", value: 1 },
+		"displacementBias" : { type: "f", value: 0 }
+
+	},
+
+	fog : {
+
+		"fogDensity" : { type: "f", value: 0.00025 },
+		"fogNear" : { type: "f", value: 1 },
+		"fogFar" : { type: "f", value: 2000 },
+		"fogColor" : { type: "c", value: new THREE.Color( 0xffffff ) }
+
+	},
+
+	lights: {
+
+		"ambientLightColor" : { type: "fv", value: [] },
+
+		"directionalLightDirection" : { type: "fv", value: [] },
+		"directionalLightColor" : { type: "fv", value: [] },
+
+		"hemisphereLightDirection" : { type: "fv", value: [] },
+		"hemisphereLightSkyColor" : { type: "fv", value: [] },
+		"hemisphereLightGroundColor" : { type: "fv", value: [] },
+
+		"pointLightColor" : { type: "fv", value: [] },
+		"pointLightPosition" : { type: "fv", value: [] },
+		"pointLightDistance" : { type: "fv1", value: [] },
+		"pointLightDecay" : { type: "fv1", value: [] },
+
+		"spotLightColor" : { type: "fv", value: [] },
+		"spotLightPosition" : { type: "fv", value: [] },
+		"spotLightDirection" : { type: "fv", value: [] },
+		"spotLightDistance" : { type: "fv1", value: [] },
+		"spotLightAngleCos" : { type: "fv1", value: [] },
+		"spotLightExponent" : { type: "fv1", value: [] },
+		"spotLightDecay" : { type: "fv1", value: [] }
+
+	},
+
+	points: {
+
+		"psColor" : { type: "c", value: new THREE.Color( 0xeeeeee ) },
+		"opacity" : { type: "f", value: 1.0 },
+		"size" : { type: "f", value: 1.0 },
+		"scale" : { type: "f", value: 1.0 },
+		"map" : { type: "t", value: null },
+		"offsetRepeat" : { type: "v4", value: new THREE.Vector4( 0, 0, 1, 1 ) },
+
+		"fogDensity" : { type: "f", value: 0.00025 },
+		"fogNear" : { type: "f", value: 1 },
+		"fogFar" : { type: "f", value: 2000 },
+		"fogColor" : { type: "c", value: new THREE.Color( 0xffffff ) }
+
+	},
+
+	shadowmap: {
+
+		"shadowMap": { type: "tv", value: [] },
+		"shadowMapSize": { type: "v2v", value: [] },
+
+		"shadowBias" : { type: "fv1", value: [] },
+		"shadowDarkness": { type: "fv1", value: [] },
+
+		"shadowMatrix" : { type: "m4v", value: [] }
+
+	}
+
+};
+
+// File:src/renderers/shaders/ShaderLib.js
+
+/**
+ * Webgl Shader Library for three.js
+ *
+ * @author alteredq / http://alteredqualia.com/
+ * @author mrdoob / http://mrdoob.com/
+ * @author mikael emtinger / http://gomo.se/
+ */
+
+
+THREE.ShaderLib = {
+
+	'basic': {
+
+		uniforms: THREE.UniformsUtils.merge( [
+
+			THREE.UniformsLib[ "common" ],
+			THREE.UniformsLib[ "aomap" ],
+			THREE.UniformsLib[ "fog" ],
+			THREE.UniformsLib[ "shadowmap" ]
+
+		] ),
+
+		vertexShader: [
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "uv_pars_vertex" ],
+			THREE.ShaderChunk[ "uv2_pars_vertex" ],
+			THREE.ShaderChunk[ "envmap_pars_vertex" ],
+			THREE.ShaderChunk[ "color_pars_vertex" ],
+			THREE.ShaderChunk[ "morphtarget_pars_vertex" ],
+			THREE.ShaderChunk[ "skinning_pars_vertex" ],
+			THREE.ShaderChunk[ "shadowmap_pars_vertex" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_vertex" ],
+
+			"void main() {",
+
+				THREE.ShaderChunk[ "uv_vertex" ],
+				THREE.ShaderChunk[ "uv2_vertex" ],
+				THREE.ShaderChunk[ "color_vertex" ],
+				THREE.ShaderChunk[ "skinbase_vertex" ],
+
+			"	#ifdef USE_ENVMAP",
+
+				THREE.ShaderChunk[ "beginnormal_vertex" ],
+				THREE.ShaderChunk[ "morphnormal_vertex" ],
+				THREE.ShaderChunk[ "skinnormal_vertex" ],
+				THREE.ShaderChunk[ "defaultnormal_vertex" ],
+
+			"	#endif",
+
+				THREE.ShaderChunk[ "begin_vertex" ],
+				THREE.ShaderChunk[ "morphtarget_vertex" ],
+				THREE.ShaderChunk[ "skinning_vertex" ],
+				THREE.ShaderChunk[ "project_vertex" ],
+				THREE.ShaderChunk[ "logdepthbuf_vertex" ],
+
+				THREE.ShaderChunk[ "worldpos_vertex" ],
+				THREE.ShaderChunk[ "envmap_vertex" ],
+				THREE.ShaderChunk[ "shadowmap_vertex" ],
+
+			"}"
+
+		].join( "\n" ),
+
+		fragmentShader: [
+
+			"uniform vec3 diffuse;",
+			"uniform float opacity;",
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "color_pars_fragment" ],
+			THREE.ShaderChunk[ "uv_pars_fragment" ],
+			THREE.ShaderChunk[ "uv2_pars_fragment" ],
+			THREE.ShaderChunk[ "map_pars_fragment" ],
+			THREE.ShaderChunk[ "alphamap_pars_fragment" ],
+			THREE.ShaderChunk[ "aomap_pars_fragment" ],
+			THREE.ShaderChunk[ "envmap_pars_fragment" ],
+			THREE.ShaderChunk[ "fog_pars_fragment" ],
+			THREE.ShaderChunk[ "shadowmap_pars_fragment" ],
+			THREE.ShaderChunk[ "specularmap_pars_fragment" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_fragment" ],
+
+			"void main() {",
+
+			"	vec3 outgoingLight = vec3( 0.0 );",
+			"	vec4 diffuseColor = vec4( diffuse, opacity );",
+			"	vec3 totalAmbientLight = vec3( 1.0 );", // hardwired
+			"	vec3 shadowMask = vec3( 1.0 );",
+
+				THREE.ShaderChunk[ "logdepthbuf_fragment" ],
+				THREE.ShaderChunk[ "map_fragment" ],
+				THREE.ShaderChunk[ "color_fragment" ],
+				THREE.ShaderChunk[ "alphamap_fragment" ],
+				THREE.ShaderChunk[ "alphatest_fragment" ],
+				THREE.ShaderChunk[ "specularmap_fragment" ],
+				THREE.ShaderChunk[ "aomap_fragment" ],
+				THREE.ShaderChunk[ "shadowmap_fragment" ],
+
+			"	outgoingLight = diffuseColor.rgb * totalAmbientLight * shadowMask;",
+
+				THREE.ShaderChunk[ "envmap_fragment" ],
+
+				THREE.ShaderChunk[ "linear_to_gamma_fragment" ],
+
+				THREE.ShaderChunk[ "fog_fragment" ],
+
+			"	gl_FragColor = vec4( outgoingLight, diffuseColor.a );",
+
+			"}"
+
+		].join( "\n" )
+
+	},
+
+	'lambert': {
+
+		uniforms: THREE.UniformsUtils.merge( [
+
+			THREE.UniformsLib[ "common" ],
+			THREE.UniformsLib[ "fog" ],
+			THREE.UniformsLib[ "lights" ],
+			THREE.UniformsLib[ "shadowmap" ],
+
+			{
+				"emissive" : { type: "c", value: new THREE.Color( 0x000000 ) }
+			}
+
+		] ),
+
+		vertexShader: [
+
+			"#define LAMBERT",
+
+			"varying vec3 vLightFront;",
+
+			"#ifdef DOUBLE_SIDED",
+
+			"	varying vec3 vLightBack;",
+
+			"#endif",
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "uv_pars_vertex" ],
+			THREE.ShaderChunk[ "uv2_pars_vertex" ],
+			THREE.ShaderChunk[ "envmap_pars_vertex" ],
+			THREE.ShaderChunk[ "lights_lambert_pars_vertex" ],
+			THREE.ShaderChunk[ "color_pars_vertex" ],
+			THREE.ShaderChunk[ "morphtarget_pars_vertex" ],
+			THREE.ShaderChunk[ "skinning_pars_vertex" ],
+			THREE.ShaderChunk[ "shadowmap_pars_vertex" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_vertex" ],
+
+			"void main() {",
+
+				THREE.ShaderChunk[ "uv_vertex" ],
+				THREE.ShaderChunk[ "uv2_vertex" ],
+				THREE.ShaderChunk[ "color_vertex" ],
+
+				THREE.ShaderChunk[ "beginnormal_vertex" ],
+				THREE.ShaderChunk[ "morphnormal_vertex" ],
+				THREE.ShaderChunk[ "skinbase_vertex" ],
+				THREE.ShaderChunk[ "skinnormal_vertex" ],
+				THREE.ShaderChunk[ "defaultnormal_vertex" ],
+
+				THREE.ShaderChunk[ "begin_vertex" ],
+				THREE.ShaderChunk[ "morphtarget_vertex" ],
+				THREE.ShaderChunk[ "skinning_vertex" ],
+				THREE.ShaderChunk[ "project_vertex" ],
+				THREE.ShaderChunk[ "logdepthbuf_vertex" ],
+
+				THREE.ShaderChunk[ "worldpos_vertex" ],
+				THREE.ShaderChunk[ "envmap_vertex" ],
+				THREE.ShaderChunk[ "lights_lambert_vertex" ],
+				THREE.ShaderChunk[ "shadowmap_vertex" ],
+
+			"}"
+
+		].join( "\n" ),
+
+		fragmentShader: [
+
+			"uniform vec3 diffuse;",
+			"uniform vec3 emissive;",
+			"uniform float opacity;",
+
+			"uniform vec3 ambientLightColor;",
+
+			"varying vec3 vLightFront;",
+
+			"#ifdef DOUBLE_SIDED",
+
+			"	varying vec3 vLightBack;",
+
+			"#endif",
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "color_pars_fragment" ],
+			THREE.ShaderChunk[ "uv_pars_fragment" ],
+			THREE.ShaderChunk[ "uv2_pars_fragment" ],
+			THREE.ShaderChunk[ "map_pars_fragment" ],
+			THREE.ShaderChunk[ "alphamap_pars_fragment" ],
+			THREE.ShaderChunk[ "envmap_pars_fragment" ],
+			THREE.ShaderChunk[ "fog_pars_fragment" ],
+			THREE.ShaderChunk[ "shadowmap_pars_fragment" ],
+			THREE.ShaderChunk[ "specularmap_pars_fragment" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_fragment" ],
+
+			"void main() {",
+
+			"	vec3 outgoingLight = vec3( 0.0 );",	// outgoing light does not have an alpha, the surface does
+			"	vec4 diffuseColor = vec4( diffuse, opacity );",
+			"	vec3 totalAmbientLight = ambientLightColor;",
+			"	vec3 shadowMask = vec3( 1.0 );",
+
+				THREE.ShaderChunk[ "logdepthbuf_fragment" ],
+				THREE.ShaderChunk[ "map_fragment" ],
+				THREE.ShaderChunk[ "color_fragment" ],
+				THREE.ShaderChunk[ "alphamap_fragment" ],
+				THREE.ShaderChunk[ "alphatest_fragment" ],
+				THREE.ShaderChunk[ "specularmap_fragment" ],
+				THREE.ShaderChunk[ "shadowmap_fragment" ],
+
+			"	#ifdef DOUBLE_SIDED",
+
+			"		if ( gl_FrontFacing )",
+			"			outgoingLight += diffuseColor.rgb * ( vLightFront * shadowMask + totalAmbientLight ) + emissive;",
+			"		else",
+			"			outgoingLight += diffuseColor.rgb * ( vLightBack * shadowMask + totalAmbientLight ) + emissive;",
+
+			"	#else",
+
+			"		outgoingLight += diffuseColor.rgb * ( vLightFront * shadowMask + totalAmbientLight ) + emissive;",
+
+			"	#endif",
+
+				THREE.ShaderChunk[ "envmap_fragment" ],
+
+				THREE.ShaderChunk[ "linear_to_gamma_fragment" ],
+
+				THREE.ShaderChunk[ "fog_fragment" ],
+
+			"	gl_FragColor = vec4( outgoingLight, diffuseColor.a );",
+
+			"}"
+
+		].join( "\n" )
+
+	},
+
+	'phong': {
+
+		uniforms: THREE.UniformsUtils.merge( [
+
+			THREE.UniformsLib[ "common" ],
+			THREE.UniformsLib[ "aomap" ],
+			THREE.UniformsLib[ "lightmap" ],
+			THREE.UniformsLib[ "emissivemap" ],
+			THREE.UniformsLib[ "bumpmap" ],
+			THREE.UniformsLib[ "normalmap" ],
+			THREE.UniformsLib[ "displacementmap" ],
+			THREE.UniformsLib[ "fog" ],
+			THREE.UniformsLib[ "lights" ],
+			THREE.UniformsLib[ "shadowmap" ],
+
+			{
+				"emissive" : { type: "c", value: new THREE.Color( 0x000000 ) },
+				"specular" : { type: "c", value: new THREE.Color( 0x111111 ) },
+				"shininess": { type: "f", value: 30 }
+			}
+
+		] ),
+
+		vertexShader: [
+
+			"#define PHONG",
+
+			"varying vec3 vViewPosition;",
+
+			"#ifndef FLAT_SHADED",
+
+			"	varying vec3 vNormal;",
+
+			"#endif",
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "uv_pars_vertex" ],
+			THREE.ShaderChunk[ "uv2_pars_vertex" ],
+			THREE.ShaderChunk[ "displacementmap_pars_vertex" ],
+			THREE.ShaderChunk[ "envmap_pars_vertex" ],
+			THREE.ShaderChunk[ "lights_phong_pars_vertex" ],
+			THREE.ShaderChunk[ "color_pars_vertex" ],
+			THREE.ShaderChunk[ "morphtarget_pars_vertex" ],
+			THREE.ShaderChunk[ "skinning_pars_vertex" ],
+			THREE.ShaderChunk[ "shadowmap_pars_vertex" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_vertex" ],
+
+			"void main() {",
+
+				THREE.ShaderChunk[ "uv_vertex" ],
+				THREE.ShaderChunk[ "uv2_vertex" ],
+				THREE.ShaderChunk[ "color_vertex" ],
+
+				THREE.ShaderChunk[ "beginnormal_vertex" ],
+				THREE.ShaderChunk[ "morphnormal_vertex" ],
+				THREE.ShaderChunk[ "skinbase_vertex" ],
+				THREE.ShaderChunk[ "skinnormal_vertex" ],
+				THREE.ShaderChunk[ "defaultnormal_vertex" ],
+
+			"#ifndef FLAT_SHADED", // Normal computed with derivatives when FLAT_SHADED
+
+			"	vNormal = normalize( transformedNormal );",
+
+			"#endif",
+
+				THREE.ShaderChunk[ "begin_vertex" ],
+				THREE.ShaderChunk[ "displacementmap_vertex" ],
+				THREE.ShaderChunk[ "morphtarget_vertex" ],
+				THREE.ShaderChunk[ "skinning_vertex" ],
+				THREE.ShaderChunk[ "project_vertex" ],
+				THREE.ShaderChunk[ "logdepthbuf_vertex" ],
+
+			"	vViewPosition = - mvPosition.xyz;",
+
+				THREE.ShaderChunk[ "worldpos_vertex" ],
+				THREE.ShaderChunk[ "envmap_vertex" ],
+				THREE.ShaderChunk[ "lights_phong_vertex" ],
+				THREE.ShaderChunk[ "shadowmap_vertex" ],
+
+			"}"
+
+		].join( "\n" ),
+
+		fragmentShader: [
+
+			"#define PHONG",
+
+			"uniform vec3 diffuse;",
+			"uniform vec3 emissive;",
+			"uniform vec3 specular;",
+			"uniform float shininess;",
+			"uniform float opacity;",
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "color_pars_fragment" ],
+			THREE.ShaderChunk[ "uv_pars_fragment" ],
+			THREE.ShaderChunk[ "uv2_pars_fragment" ],
+			THREE.ShaderChunk[ "map_pars_fragment" ],
+			THREE.ShaderChunk[ "alphamap_pars_fragment" ],
+			THREE.ShaderChunk[ "aomap_pars_fragment" ],
+			THREE.ShaderChunk[ "lightmap_pars_fragment" ],
+			THREE.ShaderChunk[ "emissivemap_pars_fragment" ],
+			THREE.ShaderChunk[ "envmap_pars_fragment" ],
+			THREE.ShaderChunk[ "fog_pars_fragment" ],
+			THREE.ShaderChunk[ "lights_phong_pars_fragment" ],
+			THREE.ShaderChunk[ "shadowmap_pars_fragment" ],
+			THREE.ShaderChunk[ "bumpmap_pars_fragment" ],
+			THREE.ShaderChunk[ "normalmap_pars_fragment" ],
+			THREE.ShaderChunk[ "specularmap_pars_fragment" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_fragment" ],
+
+			"void main() {",
+
+			"	vec3 outgoingLight = vec3( 0.0 );",
+			"	vec4 diffuseColor = vec4( diffuse, opacity );",
+			"	vec3 totalAmbientLight = ambientLightColor;",
+			"	vec3 totalEmissiveLight = emissive;",
+			"	vec3 shadowMask = vec3( 1.0 );",
+
+				THREE.ShaderChunk[ "logdepthbuf_fragment" ],
+				THREE.ShaderChunk[ "map_fragment" ],
+				THREE.ShaderChunk[ "color_fragment" ],
+				THREE.ShaderChunk[ "alphamap_fragment" ],
+				THREE.ShaderChunk[ "alphatest_fragment" ],
+				THREE.ShaderChunk[ "specularmap_fragment" ],
+				THREE.ShaderChunk[ "normal_phong_fragment" ],
+				THREE.ShaderChunk[ "lightmap_fragment" ],
+				THREE.ShaderChunk[ "hemilight_fragment" ],
+				THREE.ShaderChunk[ "aomap_fragment" ],
+				THREE.ShaderChunk[ "emissivemap_fragment" ],
+
+				THREE.ShaderChunk[ "lights_phong_fragment" ],
+				THREE.ShaderChunk[ "shadowmap_fragment" ],
+
+				"totalDiffuseLight *= shadowMask;",
+				"totalSpecularLight *= shadowMask;",
+
+				"#ifdef METAL",
+
+				"	outgoingLight += diffuseColor.rgb * ( totalDiffuseLight + totalAmbientLight ) * specular + totalSpecularLight + totalEmissiveLight;",
+
+				"#else",
+
+				"	outgoingLight += diffuseColor.rgb * ( totalDiffuseLight + totalAmbientLight ) + totalSpecularLight + totalEmissiveLight;",
+
+				"#endif",
+
+				THREE.ShaderChunk[ "envmap_fragment" ],
+
+				THREE.ShaderChunk[ "linear_to_gamma_fragment" ],
+
+				THREE.ShaderChunk[ "fog_fragment" ],
+
+			"	gl_FragColor = vec4( outgoingLight, diffuseColor.a );",
+
+			"}"
+
+		].join( "\n" )
+
+	},
+
+	'points': {
+
+		uniforms: THREE.UniformsUtils.merge( [
+
+			THREE.UniformsLib[ "points" ],
+			THREE.UniformsLib[ "shadowmap" ]
+
+		] ),
+
+		vertexShader: [
+
+			"uniform float size;",
+			"uniform float scale;",
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "color_pars_vertex" ],
+			THREE.ShaderChunk[ "shadowmap_pars_vertex" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_vertex" ],
+
+			"void main() {",
+
+				THREE.ShaderChunk[ "color_vertex" ],
+
+			"	vec4 mvPosition = modelViewMatrix * vec4( position, 1.0 );",
+
+			"	#ifdef USE_SIZEATTENUATION",
+			"		gl_PointSize = size * ( scale / length( mvPosition.xyz ) );",
+			"	#else",
+			"		gl_PointSize = size;",
+			"	#endif",
+
+			"	gl_Position = projectionMatrix * mvPosition;",
+
+				THREE.ShaderChunk[ "logdepthbuf_vertex" ],
+				THREE.ShaderChunk[ "worldpos_vertex" ],
+				THREE.ShaderChunk[ "shadowmap_vertex" ],
+
+			"}"
+
+		].join( "\n" ),
+
+		fragmentShader: [
+
+			"uniform vec3 psColor;",
+			"uniform float opacity;",
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "color_pars_fragment" ],
+			THREE.ShaderChunk[ "map_particle_pars_fragment" ],
+			THREE.ShaderChunk[ "fog_pars_fragment" ],
+			THREE.ShaderChunk[ "shadowmap_pars_fragment" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_fragment" ],
+
+			"void main() {",
+
+			"	vec3 outgoingLight = vec3( 0.0 );",
+			"	vec4 diffuseColor = vec4( psColor, opacity );",
+			"	vec3 shadowMask = vec3( 1.0 );",
+
+				THREE.ShaderChunk[ "logdepthbuf_fragment" ],
+				THREE.ShaderChunk[ "map_particle_fragment" ],
+				THREE.ShaderChunk[ "color_fragment" ],
+				THREE.ShaderChunk[ "alphatest_fragment" ],
+				THREE.ShaderChunk[ "shadowmap_fragment" ],
+
+			"	outgoingLight = diffuseColor.rgb * shadowMask;",
+
+				THREE.ShaderChunk[ "fog_fragment" ],
+
+			"	gl_FragColor = vec4( outgoingLight, diffuseColor.a );",
+
+			"}"
+
+		].join( "\n" )
+
+	},
+
+	'dashed': {
+
+		uniforms: THREE.UniformsUtils.merge( [
+
+			THREE.UniformsLib[ "common" ],
+			THREE.UniformsLib[ "fog" ],
+
+			{
+				"scale"    : { type: "f", value: 1 },
+				"dashSize" : { type: "f", value: 1 },
+				"totalSize": { type: "f", value: 2 }
+			}
+
+		] ),
+
+		vertexShader: [
+
+			"uniform float scale;",
+			"attribute float lineDistance;",
+
+			"varying float vLineDistance;",
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "color_pars_vertex" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_vertex" ],
+
+			"void main() {",
+
+				THREE.ShaderChunk[ "color_vertex" ],
+
+			"	vLineDistance = scale * lineDistance;",
+
+			"	vec4 mvPosition = modelViewMatrix * vec4( position, 1.0 );",
+			"	gl_Position = projectionMatrix * mvPosition;",
+
+				THREE.ShaderChunk[ "logdepthbuf_vertex" ],
+
+			"}"
+
+		].join( "\n" ),
+
+		fragmentShader: [
+
+			"uniform vec3 diffuse;",
+			"uniform float opacity;",
+
+			"uniform float dashSize;",
+			"uniform float totalSize;",
+
+			"varying float vLineDistance;",
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "color_pars_fragment" ],
+			THREE.ShaderChunk[ "fog_pars_fragment" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_fragment" ],
+
+			"void main() {",
+
+			"	if ( mod( vLineDistance, totalSize ) > dashSize ) {",
+
+			"		discard;",
+
+			"	}",
+
+			"	vec3 outgoingLight = vec3( 0.0 );",
+			"	vec4 diffuseColor = vec4( diffuse, opacity );",
+
+				THREE.ShaderChunk[ "logdepthbuf_fragment" ],
+				THREE.ShaderChunk[ "color_fragment" ],
+
+			"	outgoingLight = diffuseColor.rgb;", // simple shader
+
+				THREE.ShaderChunk[ "fog_fragment" ],
+
+			"	gl_FragColor = vec4( outgoingLight, diffuseColor.a );",
+
+			"}"
+
+		].join( "\n" )
+
+	},
+
+	'depth': {
+
+		uniforms: {
+
+			"mNear": { type: "f", value: 1.0 },
+			"mFar" : { type: "f", value: 2000.0 },
+			"opacity" : { type: "f", value: 1.0 }
+
+		},
+
+		vertexShader: [
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "morphtarget_pars_vertex" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_vertex" ],
+
+			"void main() {",
+
+				THREE.ShaderChunk[ "begin_vertex" ],
+				THREE.ShaderChunk[ "morphtarget_vertex" ],
+				THREE.ShaderChunk[ "project_vertex" ],
+				THREE.ShaderChunk[ "logdepthbuf_vertex" ],
+
+			"}"
+
+		].join( "\n" ),
+
+		fragmentShader: [
+
+			"uniform float mNear;",
+			"uniform float mFar;",
+			"uniform float opacity;",
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_fragment" ],
+
+			"void main() {",
+
+				THREE.ShaderChunk[ "logdepthbuf_fragment" ],
+
+			"	#ifdef USE_LOGDEPTHBUF_EXT",
+
+			"		float depth = gl_FragDepthEXT / gl_FragCoord.w;",
+
+			"	#else",
+
+			"		float depth = gl_FragCoord.z / gl_FragCoord.w;",
+
+			"	#endif",
+
+			"	float color = 1.0 - smoothstep( mNear, mFar, depth );",
+			"	gl_FragColor = vec4( vec3( color ), opacity );",
+
+			"}"
+
+		].join( "\n" )
+
+	},
+
+	'normal': {
+
+		uniforms: {
+
+			"opacity" : { type: "f", value: 1.0 }
+
+		},
+
+		vertexShader: [
+
+			"varying vec3 vNormal;",
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "morphtarget_pars_vertex" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_vertex" ],
+
+			"void main() {",
+
+			"	vNormal = normalize( normalMatrix * normal );",
+
+				THREE.ShaderChunk[ "begin_vertex" ],
+				THREE.ShaderChunk[ "morphtarget_vertex" ],
+				THREE.ShaderChunk[ "project_vertex" ],
+				THREE.ShaderChunk[ "logdepthbuf_vertex" ],
+
+			"}"
+
+		].join( "\n" ),
+
+		fragmentShader: [
+
+			"uniform float opacity;",
+			"varying vec3 vNormal;",
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_fragment" ],
+
+			"void main() {",
+
+			"	gl_FragColor = vec4( 0.5 * normalize( vNormal ) + 0.5, opacity );",
+
+				THREE.ShaderChunk[ "logdepthbuf_fragment" ],
+
+			"}"
+
+		].join( "\n" )
+
+	},
+
+	/* -------------------------------------------------------------------------
+	//	Cube map shader
+	 ------------------------------------------------------------------------- */
+
+	'cube': {
+
+		uniforms: { "tCube": { type: "t", value: null },
+					"tFlip": { type: "f", value: - 1 } },
+
+		vertexShader: [
+
+			"varying vec3 vWorldPosition;",
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_vertex" ],
+
+			"void main() {",
+
+			"	vWorldPosition = transformDirection( position, modelMatrix );",
+
+			"	gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );",
+
+				THREE.ShaderChunk[ "logdepthbuf_vertex" ],
+
+			"}"
+
+		].join( "\n" ),
+
+		fragmentShader: [
+
+			"uniform samplerCube tCube;",
+			"uniform float tFlip;",
+
+			"varying vec3 vWorldPosition;",
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_fragment" ],
+
+			"void main() {",
+
+			"	gl_FragColor = textureCube( tCube, vec3( tFlip * vWorldPosition.x, vWorldPosition.yz ) );",
+
+				THREE.ShaderChunk[ "logdepthbuf_fragment" ],
+
+			"}"
+
+		].join( "\n" )
+
+	},
+
+	/* -------------------------------------------------------------------------
+	//	Cube map shader
+	 ------------------------------------------------------------------------- */
+
+	'equirect': {
+
+		uniforms: { "tEquirect": { type: "t", value: null },
+					"tFlip": { type: "f", value: - 1 } },
+
+		vertexShader: [
+
+			"varying vec3 vWorldPosition;",
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_vertex" ],
+
+			"void main() {",
+
+			"	vWorldPosition = transformDirection( position, modelMatrix );",
+
+			"	gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );",
+
+				THREE.ShaderChunk[ "logdepthbuf_vertex" ],
+
+			"}"
+
+		].join( "\n" ),
+
+		fragmentShader: [
+
+			"uniform sampler2D tEquirect;",
+			"uniform float tFlip;",
+
+			"varying vec3 vWorldPosition;",
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_fragment" ],
+
+			"void main() {",
+
+				// "	gl_FragColor = textureCube( tCube, vec3( tFlip * vWorldPosition.x, vWorldPosition.yz ) );",
+				"vec3 direction = normalize( vWorldPosition );",
+				"vec2 sampleUV;",
+				"sampleUV.y = saturate( tFlip * direction.y * -0.5 + 0.5 );",
+				"sampleUV.x = atan( direction.z, direction.x ) * RECIPROCAL_PI2 + 0.5;",
+				"gl_FragColor = texture2D( tEquirect, sampleUV );",
+
+				THREE.ShaderChunk[ "logdepthbuf_fragment" ],
+
+			"}"
+
+		].join( "\n" )
+
+	},
+
+	/* Depth encoding into RGBA texture
+	 *
+	 * based on SpiderGL shadow map example
+	 * http://spidergl.org/example.php?id=6
+	 *
+	 * originally from
+	 * http://www.gamedev.net/topic/442138-packing-a-float-into-a-a8r8g8b8-texture-shader/page__whichpage__1%25EF%25BF%25BD
+	 *
+	 * see also
+	 * http://aras-p.info/blog/2009/07/30/encoding-floats-to-rgba-the-final/
+	 */
+
+	'depthRGBA': {
+
+		uniforms: {},
+
+		vertexShader: [
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "morphtarget_pars_vertex" ],
+			THREE.ShaderChunk[ "skinning_pars_vertex" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_vertex" ],
+
+			"void main() {",
+
+				THREE.ShaderChunk[ "skinbase_vertex" ],
+
+				THREE.ShaderChunk[ "begin_vertex" ],
+				THREE.ShaderChunk[ "morphtarget_vertex" ],
+				THREE.ShaderChunk[ "skinning_vertex" ],
+				THREE.ShaderChunk[ "project_vertex" ],
+				THREE.ShaderChunk[ "logdepthbuf_vertex" ],
+
+			"}"
+
+		].join( "\n" ),
+
+		fragmentShader: [
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "logdepthbuf_pars_fragment" ],
+
+			"vec4 pack_depth( const in float depth ) {",
+
+			"	const vec4 bit_shift = vec4( 256.0 * 256.0 * 256.0, 256.0 * 256.0, 256.0, 1.0 );",
+			"	const vec4 bit_mask = vec4( 0.0, 1.0 / 256.0, 1.0 / 256.0, 1.0 / 256.0 );",
+			"	vec4 res = mod( depth * bit_shift * vec4( 255 ), vec4( 256 ) ) / vec4( 255 );", // "	vec4 res = fract( depth * bit_shift );",
+			"	res -= res.xxyz * bit_mask;",
+			"	return res;",
+
+			"}",
+
+			"void main() {",
+
+				THREE.ShaderChunk[ "logdepthbuf_fragment" ],
+
+			"	#ifdef USE_LOGDEPTHBUF_EXT",
+
+			"		gl_FragData[ 0 ] = pack_depth( gl_FragDepthEXT );",
+
+			"	#else",
+
+			"		gl_FragData[ 0 ] = pack_depth( gl_FragCoord.z );",
+
+			"	#endif",
+
+				//"gl_FragData[ 0 ] = pack_depth( gl_FragCoord.z / gl_FragCoord.w );",
+				//"float z = ( ( gl_FragCoord.z / gl_FragCoord.w ) - 3.0 ) / ( 4000.0 - 3.0 );",
+				//"gl_FragData[ 0 ] = pack_depth( z );",
+				//"gl_FragData[ 0 ] = vec4( z, z, z, 1.0 );",
+
+			"}"
+
+		].join( "\n" )
+
+	},
+
+
+	'distanceRGBA': {
+
+		uniforms: {
+
+			"lightPos": { type: "v3", value: new THREE.Vector3( 0, 0, 0 ) }
+
+		},
+
+		vertexShader: [
+
+			"varying vec4 vWorldPosition;",
+
+			THREE.ShaderChunk[ "common" ],
+			THREE.ShaderChunk[ "morphtarget_pars_vertex" ],
+			THREE.ShaderChunk[ "skinning_pars_vertex" ],
+
+			"void main() {",
+
+				THREE.ShaderChunk[ "skinbase_vertex" ],
+				THREE.ShaderChunk[ "begin_vertex" ],
+				THREE.ShaderChunk[ "morphtarget_vertex" ],
+				THREE.ShaderChunk[ "skinning_vertex" ],
+				THREE.ShaderChunk[ "project_vertex" ],
+				THREE.ShaderChunk[ "worldpos_vertex" ],
+
+				"vWorldPosition = worldPosition;",
+
+			"}"
+
+		].join( "\n" ),
+
+		fragmentShader: [
+
+			"uniform vec3 lightPos;",
+			"varying vec4 vWorldPosition;",
+
+			THREE.ShaderChunk[ "common" ],
+
+			"vec4 pack1K ( float depth ) {",
+
+			"   depth /= 1000.0;",
+			"   const vec4 bitSh = vec4( 256.0 * 256.0 * 256.0, 256.0 * 256.0, 256.0, 1.0 );",
+  			"	const vec4 bitMsk = vec4( 0.0, 1.0 / 256.0, 1.0 / 256.0, 1.0 / 256.0 );",
+   			"	vec4 res = fract( depth * bitSh );",
+   			"	res -= res.xxyz * bitMsk;",
+   			"	return res; ",
+
+			"}",
+
+			"float unpack1K ( vec4 color ) {",
+
+			"	const vec4 bitSh = vec4( 1.0 / ( 256.0 * 256.0 * 256.0 ), 1.0 / ( 256.0 * 256.0 ), 1.0 / 256.0, 1.0 );",
+			"	return dot( color, bitSh ) * 1000.0;",
+
+			"}",
+
+			"void main () {",
+
+			"	gl_FragColor = pack1K( length( vWorldPosition.xyz - lightPos.xyz ) );",
+
+			"}"
+
+		].join( "\n" )
+
+	}
 
 };
 
@@ -24233,4 +27493,2972 @@ THREE.WebGLState = function ( gl, extensions, paramThreeToGL ) {
 	};
 
 };
+
+// File:src/renderers/webgl/plugins/LensFlarePlugin.js
+
+/**
+ * @author mikael emtinger / http://gomo.se/
+ * @author alteredq / http://alteredqualia.com/
+ */
+
+THREE.LensFlarePlugin = function ( renderer, flares ) {
+
+	var gl = renderer.context;
+	var state = renderer.state;
+
+	var vertexBuffer, elementBuffer;
+	var program, attributes, uniforms;
+	var hasVertexTexture;
+
+	var tempTexture, occlusionTexture;
+
+	function init() {
+
+		var vertices = new Float32Array( [
+			- 1, - 1,  0, 0,
+			 1, - 1,  1, 0,
+			 1,  1,  1, 1,
+			- 1,  1,  0, 1
+		] );
+
+		var faces = new Uint16Array( [
+			0, 1, 2,
+			0, 2, 3
+		] );
+
+		// buffers
+
+		vertexBuffer     = gl.createBuffer();
+		elementBuffer    = gl.createBuffer();
+
+		gl.bindBuffer( gl.ARRAY_BUFFER, vertexBuffer );
+		gl.bufferData( gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW );
+
+		gl.bindBuffer( gl.ELEMENT_ARRAY_BUFFER, elementBuffer );
+		gl.bufferData( gl.ELEMENT_ARRAY_BUFFER, faces, gl.STATIC_DRAW );
+
+		// textures
+
+		tempTexture      = gl.createTexture();
+		occlusionTexture = gl.createTexture();
+
+		state.bindTexture( gl.TEXTURE_2D, tempTexture );
+		gl.texImage2D( gl.TEXTURE_2D, 0, gl.RGB, 16, 16, 0, gl.RGB, gl.UNSIGNED_BYTE, null );
+		gl.texParameteri( gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE );
+		gl.texParameteri( gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE );
+		gl.texParameteri( gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST );
+		gl.texParameteri( gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST );
+
+		state.bindTexture( gl.TEXTURE_2D, occlusionTexture );
+		gl.texImage2D( gl.TEXTURE_2D, 0, gl.RGBA, 16, 16, 0, gl.RGBA, gl.UNSIGNED_BYTE, null );
+		gl.texParameteri( gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE );
+		gl.texParameteri( gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE );
+		gl.texParameteri( gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST );
+		gl.texParameteri( gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST );
+
+		hasVertexTexture = gl.getParameter( gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS ) > 0;
+
+		var shader;
+
+		if ( hasVertexTexture ) {
+
+			shader = {
+
+				vertexShader: [
+
+					"uniform lowp int renderType;",
+
+					"uniform vec3 screenPosition;",
+					"uniform vec2 scale;",
+					"uniform float rotation;",
+
+					"uniform sampler2D occlusionMap;",
+
+					"attribute vec2 position;",
+					"attribute vec2 uv;",
+
+					"varying vec2 vUV;",
+					"varying float vVisibility;",
+
+					"void main() {",
+
+						"vUV = uv;",
+
+						"vec2 pos = position;",
+
+						"if ( renderType == 2 ) {",
+
+							"vec4 visibility = texture2D( occlusionMap, vec2( 0.1, 0.1 ) );",
+							"visibility += texture2D( occlusionMap, vec2( 0.5, 0.1 ) );",
+							"visibility += texture2D( occlusionMap, vec2( 0.9, 0.1 ) );",
+							"visibility += texture2D( occlusionMap, vec2( 0.9, 0.5 ) );",
+							"visibility += texture2D( occlusionMap, vec2( 0.9, 0.9 ) );",
+							"visibility += texture2D( occlusionMap, vec2( 0.5, 0.9 ) );",
+							"visibility += texture2D( occlusionMap, vec2( 0.1, 0.9 ) );",
+							"visibility += texture2D( occlusionMap, vec2( 0.1, 0.5 ) );",
+							"visibility += texture2D( occlusionMap, vec2( 0.5, 0.5 ) );",
+
+							"vVisibility =        visibility.r / 9.0;",
+							"vVisibility *= 1.0 - visibility.g / 9.0;",
+							"vVisibility *=       visibility.b / 9.0;",
+							"vVisibility *= 1.0 - visibility.a / 9.0;",
+
+							"pos.x = cos( rotation ) * position.x - sin( rotation ) * position.y;",
+							"pos.y = sin( rotation ) * position.x + cos( rotation ) * position.y;",
+
+						"}",
+
+						"gl_Position = vec4( ( pos * scale + screenPosition.xy ).xy, screenPosition.z, 1.0 );",
+
+					"}"
+
+				].join( "\n" ),
+
+				fragmentShader: [
+
+					"uniform lowp int renderType;",
+
+					"uniform sampler2D map;",
+					"uniform float opacity;",
+					"uniform vec3 color;",
+
+					"varying vec2 vUV;",
+					"varying float vVisibility;",
+
+					"void main() {",
+
+						// pink square
+
+						"if ( renderType == 0 ) {",
+
+							"gl_FragColor = vec4( 1.0, 0.0, 1.0, 0.0 );",
+
+						// restore
+
+						"} else if ( renderType == 1 ) {",
+
+							"gl_FragColor = texture2D( map, vUV );",
+
+						// flare
+
+						"} else {",
+
+							"vec4 texture = texture2D( map, vUV );",
+							"texture.a *= opacity * vVisibility;",
+							"gl_FragColor = texture;",
+							"gl_FragColor.rgb *= color;",
+
+						"}",
+
+					"}"
+
+				].join( "\n" )
+
+			};
+
+		} else {
+
+			shader = {
+
+				vertexShader: [
+
+					"uniform lowp int renderType;",
+
+					"uniform vec3 screenPosition;",
+					"uniform vec2 scale;",
+					"uniform float rotation;",
+
+					"attribute vec2 position;",
+					"attribute vec2 uv;",
+
+					"varying vec2 vUV;",
+
+					"void main() {",
+
+						"vUV = uv;",
+
+						"vec2 pos = position;",
+
+						"if ( renderType == 2 ) {",
+
+							"pos.x = cos( rotation ) * position.x - sin( rotation ) * position.y;",
+							"pos.y = sin( rotation ) * position.x + cos( rotation ) * position.y;",
+
+						"}",
+
+						"gl_Position = vec4( ( pos * scale + screenPosition.xy ).xy, screenPosition.z, 1.0 );",
+
+					"}"
+
+				].join( "\n" ),
+
+				fragmentShader: [
+
+					"precision mediump float;",
+
+					"uniform lowp int renderType;",
+
+					"uniform sampler2D map;",
+					"uniform sampler2D occlusionMap;",
+					"uniform float opacity;",
+					"uniform vec3 color;",
+
+					"varying vec2 vUV;",
+
+					"void main() {",
+
+						// pink square
+
+						"if ( renderType == 0 ) {",
+
+							"gl_FragColor = vec4( texture2D( map, vUV ).rgb, 0.0 );",
+
+						// restore
+
+						"} else if ( renderType == 1 ) {",
+
+							"gl_FragColor = texture2D( map, vUV );",
+
+						// flare
+
+						"} else {",
+
+							"float visibility = texture2D( occlusionMap, vec2( 0.5, 0.1 ) ).a;",
+							"visibility += texture2D( occlusionMap, vec2( 0.9, 0.5 ) ).a;",
+							"visibility += texture2D( occlusionMap, vec2( 0.5, 0.9 ) ).a;",
+							"visibility += texture2D( occlusionMap, vec2( 0.1, 0.5 ) ).a;",
+							"visibility = ( 1.0 - visibility / 4.0 );",
+
+							"vec4 texture = texture2D( map, vUV );",
+							"texture.a *= opacity * visibility;",
+							"gl_FragColor = texture;",
+							"gl_FragColor.rgb *= color;",
+
+						"}",
+
+					"}"
+
+				].join( "\n" )
+
+			};
+
+		}
+
+		program = createProgram( shader );
+
+		attributes = {
+			vertex: gl.getAttribLocation ( program, "position" ),
+			uv:     gl.getAttribLocation ( program, "uv" )
+		};
+
+		uniforms = {
+			renderType:     gl.getUniformLocation( program, "renderType" ),
+			map:            gl.getUniformLocation( program, "map" ),
+			occlusionMap:   gl.getUniformLocation( program, "occlusionMap" ),
+			opacity:        gl.getUniformLocation( program, "opacity" ),
+			color:          gl.getUniformLocation( program, "color" ),
+			scale:          gl.getUniformLocation( program, "scale" ),
+			rotation:       gl.getUniformLocation( program, "rotation" ),
+			screenPosition: gl.getUniformLocation( program, "screenPosition" )
+		};
+
+	}
+
+	/*
+	 * Render lens flares
+	 * Method: renders 16x16 0xff00ff-colored points scattered over the light source area,
+	 *         reads these back and calculates occlusion.
+	 */
+
+	this.render = function ( scene, camera, viewportWidth, viewportHeight ) {
+
+		if ( flares.length === 0 ) return;
+
+		var tempPosition = new THREE.Vector3();
+
+		var invAspect = viewportHeight / viewportWidth,
+			halfViewportWidth = viewportWidth * 0.5,
+			halfViewportHeight = viewportHeight * 0.5;
+
+		var size = 16 / viewportHeight,
+			scale = new THREE.Vector2( size * invAspect, size );
+
+		var screenPosition = new THREE.Vector3( 1, 1, 0 ),
+			screenPositionPixels = new THREE.Vector2( 1, 1 );
+
+		if ( program === undefined ) {
+
+			init();
+
+		}
+
+		gl.useProgram( program );
+
+		state.initAttributes();
+		state.enableAttribute( attributes.vertex );
+		state.enableAttribute( attributes.uv );
+		state.disableUnusedAttributes();
+
+		// loop through all lens flares to update their occlusion and positions
+		// setup gl and common used attribs/uniforms
+
+		gl.uniform1i( uniforms.occlusionMap, 0 );
+		gl.uniform1i( uniforms.map, 1 );
+
+		gl.bindBuffer( gl.ARRAY_BUFFER, vertexBuffer );
+		gl.vertexAttribPointer( attributes.vertex, 2, gl.FLOAT, false, 2 * 8, 0 );
+		gl.vertexAttribPointer( attributes.uv, 2, gl.FLOAT, false, 2 * 8, 8 );
+
+		gl.bindBuffer( gl.ELEMENT_ARRAY_BUFFER, elementBuffer );
+
+		state.disable( gl.CULL_FACE );
+		gl.depthMask( false );
+
+		for ( var i = 0, l = flares.length; i < l; i ++ ) {
+
+			size = 16 / viewportHeight;
+			scale.set( size * invAspect, size );
+
+			// calc object screen position
+
+			var flare = flares[ i ];
+
+			tempPosition.set( flare.matrixWorld.elements[ 12 ], flare.matrixWorld.elements[ 13 ], flare.matrixWorld.elements[ 14 ] );
+
+			tempPosition.applyMatrix4( camera.matrixWorldInverse );
+			tempPosition.applyProjection( camera.projectionMatrix );
+
+			// setup arrays for gl programs
+
+			screenPosition.copy( tempPosition );
+
+			screenPositionPixels.x = screenPosition.x * halfViewportWidth + halfViewportWidth;
+			screenPositionPixels.y = screenPosition.y * halfViewportHeight + halfViewportHeight;
+
+			// screen cull
+
+			if ( hasVertexTexture || (
+				screenPositionPixels.x > 0 &&
+				screenPositionPixels.x < viewportWidth &&
+				screenPositionPixels.y > 0 &&
+				screenPositionPixels.y < viewportHeight ) ) {
+
+				// save current RGB to temp texture
+
+				state.activeTexture( gl.TEXTURE0 );
+				state.bindTexture( gl.TEXTURE_2D, null );
+				state.activeTexture( gl.TEXTURE1 );
+				state.bindTexture( gl.TEXTURE_2D, tempTexture );
+				gl.copyTexImage2D( gl.TEXTURE_2D, 0, gl.RGB, screenPositionPixels.x - 8, screenPositionPixels.y - 8, 16, 16, 0 );
+
+
+				// render pink quad
+
+				gl.uniform1i( uniforms.renderType, 0 );
+				gl.uniform2f( uniforms.scale, scale.x, scale.y );
+				gl.uniform3f( uniforms.screenPosition, screenPosition.x, screenPosition.y, screenPosition.z );
+
+				state.disable( gl.BLEND );
+				state.enable( gl.DEPTH_TEST );
+
+				gl.drawElements( gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0 );
+
+
+				// copy result to occlusionMap
+
+				state.activeTexture( gl.TEXTURE0 );
+				state.bindTexture( gl.TEXTURE_2D, occlusionTexture );
+				gl.copyTexImage2D( gl.TEXTURE_2D, 0, gl.RGBA, screenPositionPixels.x - 8, screenPositionPixels.y - 8, 16, 16, 0 );
+
+
+				// restore graphics
+
+				gl.uniform1i( uniforms.renderType, 1 );
+				state.disable( gl.DEPTH_TEST );
+
+				state.activeTexture( gl.TEXTURE1 );
+				state.bindTexture( gl.TEXTURE_2D, tempTexture );
+				gl.drawElements( gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0 );
+
+
+				// update object positions
+
+				flare.positionScreen.copy( screenPosition );
+
+				if ( flare.customUpdateCallback ) {
+
+					flare.customUpdateCallback( flare );
+
+				} else {
+
+					flare.updateLensFlares();
+
+				}
+
+				// render flares
+
+				gl.uniform1i( uniforms.renderType, 2 );
+				state.enable( gl.BLEND );
+
+				for ( var j = 0, jl = flare.lensFlares.length; j < jl; j ++ ) {
+
+					var sprite = flare.lensFlares[ j ];
+
+					if ( sprite.opacity > 0.001 && sprite.scale > 0.001 ) {
+
+						screenPosition.x = sprite.x;
+						screenPosition.y = sprite.y;
+						screenPosition.z = sprite.z;
+
+						size = sprite.size * sprite.scale / viewportHeight;
+
+						scale.x = size * invAspect;
+						scale.y = size;
+
+						gl.uniform3f( uniforms.screenPosition, screenPosition.x, screenPosition.y, screenPosition.z );
+						gl.uniform2f( uniforms.scale, scale.x, scale.y );
+						gl.uniform1f( uniforms.rotation, sprite.rotation );
+
+						gl.uniform1f( uniforms.opacity, sprite.opacity );
+						gl.uniform3f( uniforms.color, sprite.color.r, sprite.color.g, sprite.color.b );
+
+						state.setBlending( sprite.blending, sprite.blendEquation, sprite.blendSrc, sprite.blendDst );
+						renderer.setTexture( sprite.texture, 1 );
+
+						gl.drawElements( gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0 );
+
+					}
+
+				}
+
+			}
+
+		}
+
+		// restore gl
+
+		state.enable( gl.CULL_FACE );
+		state.enable( gl.DEPTH_TEST );
+		gl.depthMask( true );
+
+		renderer.resetGLState();
+
+	};
+
+	function createProgram ( shader ) {
+
+		var program = gl.createProgram();
+
+		var fragmentShader = gl.createShader( gl.FRAGMENT_SHADER );
+		var vertexShader = gl.createShader( gl.VERTEX_SHADER );
+
+		var prefix = "precision " + renderer.getPrecision() + " float;\n";
+
+		gl.shaderSource( fragmentShader, prefix + shader.fragmentShader );
+		gl.shaderSource( vertexShader, prefix + shader.vertexShader );
+
+		gl.compileShader( fragmentShader );
+		gl.compileShader( vertexShader );
+
+		gl.attachShader( program, fragmentShader );
+		gl.attachShader( program, vertexShader );
+
+		gl.linkProgram( program );
+
+		return program;
+
+	}
+
+};
+
+// File:src/renderers/webgl/plugins/SpritePlugin.js
+
+/**
+ * @author mikael emtinger / http://gomo.se/
+ * @author alteredq / http://alteredqualia.com/
+ */
+
+THREE.SpritePlugin = function ( renderer, sprites ) {
+
+	var gl = renderer.context;
+	var state = renderer.state;
+
+	var vertexBuffer, elementBuffer;
+	var program, attributes, uniforms;
+
+	var texture;
+
+	// decompose matrixWorld
+
+	var spritePosition = new THREE.Vector3();
+	var spriteRotation = new THREE.Quaternion();
+	var spriteScale = new THREE.Vector3();
+
+	function init() {
+
+		var vertices = new Float32Array( [
+			- 0.5, - 0.5,  0, 0,
+			  0.5, - 0.5,  1, 0,
+			  0.5,   0.5,  1, 1,
+			- 0.5,   0.5,  0, 1
+		] );
+
+		var faces = new Uint16Array( [
+			0, 1, 2,
+			0, 2, 3
+		] );
+
+		vertexBuffer  = gl.createBuffer();
+		elementBuffer = gl.createBuffer();
+
+		gl.bindBuffer( gl.ARRAY_BUFFER, vertexBuffer );
+		gl.bufferData( gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW );
+
+		gl.bindBuffer( gl.ELEMENT_ARRAY_BUFFER, elementBuffer );
+		gl.bufferData( gl.ELEMENT_ARRAY_BUFFER, faces, gl.STATIC_DRAW );
+
+		program = createProgram();
+
+		attributes = {
+			position:			gl.getAttribLocation ( program, 'position' ),
+			uv:					gl.getAttribLocation ( program, 'uv' )
+		};
+
+		uniforms = {
+			uvOffset:			gl.getUniformLocation( program, 'uvOffset' ),
+			uvScale:			gl.getUniformLocation( program, 'uvScale' ),
+
+			rotation:			gl.getUniformLocation( program, 'rotation' ),
+			scale:				gl.getUniformLocation( program, 'scale' ),
+
+			color:				gl.getUniformLocation( program, 'color' ),
+			map:				gl.getUniformLocation( program, 'map' ),
+			opacity:			gl.getUniformLocation( program, 'opacity' ),
+
+			modelViewMatrix: 	gl.getUniformLocation( program, 'modelViewMatrix' ),
+			projectionMatrix:	gl.getUniformLocation( program, 'projectionMatrix' ),
+
+			fogType:			gl.getUniformLocation( program, 'fogType' ),
+			fogDensity:			gl.getUniformLocation( program, 'fogDensity' ),
+			fogNear:			gl.getUniformLocation( program, 'fogNear' ),
+			fogFar:				gl.getUniformLocation( program, 'fogFar' ),
+			fogColor:			gl.getUniformLocation( program, 'fogColor' ),
+
+			alphaTest:			gl.getUniformLocation( program, 'alphaTest' )
+		};
+
+		var canvas = document.createElement( 'canvas' );
+		canvas.width = 8;
+		canvas.height = 8;
+
+		var context = canvas.getContext( '2d' );
+		context.fillStyle = 'white';
+		context.fillRect( 0, 0, 8, 8 );
+
+		texture = new THREE.Texture( canvas );
+		texture.needsUpdate = true;
+
+	}
+
+	this.render = function ( scene, camera ) {
+
+		if ( sprites.length === 0 ) return;
+
+		// setup gl
+
+		if ( program === undefined ) {
+
+			init();
+
+		}
+
+		gl.useProgram( program );
+
+		state.initAttributes();
+		state.enableAttribute( attributes.position );
+		state.enableAttribute( attributes.uv );
+		state.disableUnusedAttributes();
+
+		state.disable( gl.CULL_FACE );
+		state.enable( gl.BLEND );
+
+		gl.bindBuffer( gl.ARRAY_BUFFER, vertexBuffer );
+		gl.vertexAttribPointer( attributes.position, 2, gl.FLOAT, false, 2 * 8, 0 );
+		gl.vertexAttribPointer( attributes.uv, 2, gl.FLOAT, false, 2 * 8, 8 );
+
+		gl.bindBuffer( gl.ELEMENT_ARRAY_BUFFER, elementBuffer );
+
+		gl.uniformMatrix4fv( uniforms.projectionMatrix, false, camera.projectionMatrix.elements );
+
+		state.activeTexture( gl.TEXTURE0 );
+		gl.uniform1i( uniforms.map, 0 );
+
+		var oldFogType = 0;
+		var sceneFogType = 0;
+		var fog = scene.fog;
+
+		if ( fog ) {
+
+			gl.uniform3f( uniforms.fogColor, fog.color.r, fog.color.g, fog.color.b );
+
+			if ( fog instanceof THREE.Fog ) {
+
+				gl.uniform1f( uniforms.fogNear, fog.near );
+				gl.uniform1f( uniforms.fogFar, fog.far );
+
+				gl.uniform1i( uniforms.fogType, 1 );
+				oldFogType = 1;
+				sceneFogType = 1;
+
+			} else if ( fog instanceof THREE.FogExp2 ) {
+
+				gl.uniform1f( uniforms.fogDensity, fog.density );
+
+				gl.uniform1i( uniforms.fogType, 2 );
+				oldFogType = 2;
+				sceneFogType = 2;
+
+			}
+
+		} else {
+
+			gl.uniform1i( uniforms.fogType, 0 );
+			oldFogType = 0;
+			sceneFogType = 0;
+
+		}
+
+
+		// update positions and sort
+
+		for ( var i = 0, l = sprites.length; i < l; i ++ ) {
+
+			var sprite = sprites[ i ];
+
+			sprite.modelViewMatrix.multiplyMatrices( camera.matrixWorldInverse, sprite.matrixWorld );
+			sprite.z = - sprite.modelViewMatrix.elements[ 14 ];
+
+		}
+
+		sprites.sort( painterSortStable );
+
+		// render all sprites
+
+		var scale = [];
+
+		for ( var i = 0, l = sprites.length; i < l; i ++ ) {
+
+			var sprite = sprites[ i ];
+			var material = sprite.material;
+
+			gl.uniform1f( uniforms.alphaTest, material.alphaTest );
+			gl.uniformMatrix4fv( uniforms.modelViewMatrix, false, sprite.modelViewMatrix.elements );
+
+			sprite.matrixWorld.decompose( spritePosition, spriteRotation, spriteScale );
+
+			scale[ 0 ] = spriteScale.x;
+			scale[ 1 ] = spriteScale.y;
+
+			var fogType = 0;
+
+			if ( scene.fog && material.fog ) {
+
+				fogType = sceneFogType;
+
+			}
+
+			if ( oldFogType !== fogType ) {
+
+				gl.uniform1i( uniforms.fogType, fogType );
+				oldFogType = fogType;
+
+			}
+
+			if ( material.map !== null ) {
+
+				gl.uniform2f( uniforms.uvOffset, material.map.offset.x, material.map.offset.y );
+				gl.uniform2f( uniforms.uvScale, material.map.repeat.x, material.map.repeat.y );
+
+			} else {
+
+				gl.uniform2f( uniforms.uvOffset, 0, 0 );
+				gl.uniform2f( uniforms.uvScale, 1, 1 );
+
+			}
+
+			gl.uniform1f( uniforms.opacity, material.opacity );
+			gl.uniform3f( uniforms.color, material.color.r, material.color.g, material.color.b );
+
+			gl.uniform1f( uniforms.rotation, material.rotation );
+			gl.uniform2fv( uniforms.scale, scale );
+
+			state.setBlending( material.blending, material.blendEquation, material.blendSrc, material.blendDst );
+			state.setDepthTest( material.depthTest );
+			state.setDepthWrite( material.depthWrite );
+
+			if ( material.map && material.map.image && material.map.image.width ) {
+
+				renderer.setTexture( material.map, 0 );
+
+			} else {
+
+				renderer.setTexture( texture, 0 );
+
+			}
+
+			gl.drawElements( gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0 );
+
+		}
+
+		// restore gl
+
+		state.enable( gl.CULL_FACE );
+
+		renderer.resetGLState();
+
+	};
+
+	function createProgram () {
+
+		var program = gl.createProgram();
+
+		var vertexShader = gl.createShader( gl.VERTEX_SHADER );
+		var fragmentShader = gl.createShader( gl.FRAGMENT_SHADER );
+
+		gl.shaderSource( vertexShader, [
+
+			'precision ' + renderer.getPrecision() + ' float;',
+
+			'uniform mat4 modelViewMatrix;',
+			'uniform mat4 projectionMatrix;',
+			'uniform float rotation;',
+			'uniform vec2 scale;',
+			'uniform vec2 uvOffset;',
+			'uniform vec2 uvScale;',
+
+			'attribute vec2 position;',
+			'attribute vec2 uv;',
+
+			'varying vec2 vUV;',
+
+			'void main() {',
+
+				'vUV = uvOffset + uv * uvScale;',
+
+				'vec2 alignedPosition = position * scale;',
+
+				'vec2 rotatedPosition;',
+				'rotatedPosition.x = cos( rotation ) * alignedPosition.x - sin( rotation ) * alignedPosition.y;',
+				'rotatedPosition.y = sin( rotation ) * alignedPosition.x + cos( rotation ) * alignedPosition.y;',
+
+				'vec4 finalPosition;',
+
+				'finalPosition = modelViewMatrix * vec4( 0.0, 0.0, 0.0, 1.0 );',
+				'finalPosition.xy += rotatedPosition;',
+				'finalPosition = projectionMatrix * finalPosition;',
+
+				'gl_Position = finalPosition;',
+
+			'}'
+
+		].join( '\n' ) );
+
+		gl.shaderSource( fragmentShader, [
+
+			'precision ' + renderer.getPrecision() + ' float;',
+
+			'uniform vec3 color;',
+			'uniform sampler2D map;',
+			'uniform float opacity;',
+
+			'uniform int fogType;',
+			'uniform vec3 fogColor;',
+			'uniform float fogDensity;',
+			'uniform float fogNear;',
+			'uniform float fogFar;',
+			'uniform float alphaTest;',
+
+			'varying vec2 vUV;',
+
+			'void main() {',
+
+				'vec4 texture = texture2D( map, vUV );',
+
+				'if ( texture.a < alphaTest ) discard;',
+
+				'gl_FragColor = vec4( color * texture.xyz, texture.a * opacity );',
+
+				'if ( fogType > 0 ) {',
+
+					'float depth = gl_FragCoord.z / gl_FragCoord.w;',
+					'float fogFactor = 0.0;',
+
+					'if ( fogType == 1 ) {',
+
+						'fogFactor = smoothstep( fogNear, fogFar, depth );',
+
+					'} else {',
+
+						'const float LOG2 = 1.442695;',
+						'fogFactor = exp2( - fogDensity * fogDensity * depth * depth * LOG2 );',
+						'fogFactor = 1.0 - clamp( fogFactor, 0.0, 1.0 );',
+
+					'}',
+
+					'gl_FragColor = mix( gl_FragColor, vec4( fogColor, gl_FragColor.w ), fogFactor );',
+
+				'}',
+
+			'}'
+
+		].join( '\n' ) );
+
+		gl.compileShader( vertexShader );
+		gl.compileShader( fragmentShader );
+
+		gl.attachShader( program, vertexShader );
+		gl.attachShader( program, fragmentShader );
+
+		gl.linkProgram( program );
+
+		return program;
+
+	}
+
+	function painterSortStable ( a, b ) {
+
+		if ( a.z !== b.z ) {
+
+			return b.z - a.z;
+
+		} else {
+
+			return b.id - a.id;
+
+		}
+
+	}
+
+};
+
+// File:src/extras/objects/ImmediateRenderObject.js
+
+/**
+ * @author alteredq / http://alteredqualia.com/
+ */
+
+THREE.ImmediateRenderObject = function ( material ) {
+
+	THREE.Object3D.call( this );
+
+	this.material = material;
+	this.render = function ( renderCallback ) {};
+
+};
+
+THREE.ImmediateRenderObject.prototype = Object.create( THREE.Object3D.prototype );
+THREE.ImmediateRenderObject.prototype.constructor = THREE.ImmediateRenderObject;
+
+// File:src/extras/geometries/BoxGeometry.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ * based on http://papervision3d.googlecode.com/svn/trunk/as3/trunk/src/org/papervision3d/objects/primitives/Cube.as
+ */
+
+THREE.BoxGeometry = function ( width, height, depth, widthSegments, heightSegments, depthSegments ) {
+
+	THREE.Geometry.call( this );
+
+	this.type = 'BoxGeometry';
+
+	this.parameters = {
+		width: width,
+		height: height,
+		depth: depth,
+		widthSegments: widthSegments,
+		heightSegments: heightSegments,
+		depthSegments: depthSegments
+	};
+
+	this.widthSegments = widthSegments || 1;
+	this.heightSegments = heightSegments || 1;
+	this.depthSegments = depthSegments || 1;
+
+	var scope = this;
+
+	var width_half = width / 2;
+	var height_half = height / 2;
+	var depth_half = depth / 2;
+
+	buildPlane( 'z', 'y', - 1, - 1, depth, height, width_half, 0 ); // px
+	buildPlane( 'z', 'y',   1, - 1, depth, height, - width_half, 1 ); // nx
+	buildPlane( 'x', 'z',   1,   1, width, depth, height_half, 2 ); // py
+	buildPlane( 'x', 'z',   1, - 1, width, depth, - height_half, 3 ); // ny
+	buildPlane( 'x', 'y',   1, - 1, width, height, depth_half, 4 ); // pz
+	buildPlane( 'x', 'y', - 1, - 1, width, height, - depth_half, 5 ); // nz
+
+	function buildPlane( u, v, udir, vdir, width, height, depth, materialIndex ) {
+
+		var w, ix, iy,
+		gridX = scope.widthSegments,
+		gridY = scope.heightSegments,
+		width_half = width / 2,
+		height_half = height / 2,
+		offset = scope.vertices.length;
+
+		if ( ( u === 'x' && v === 'y' ) || ( u === 'y' && v === 'x' ) ) {
+
+			w = 'z';
+
+		} else if ( ( u === 'x' && v === 'z' ) || ( u === 'z' && v === 'x' ) ) {
+
+			w = 'y';
+			gridY = scope.depthSegments;
+
+		} else if ( ( u === 'z' && v === 'y' ) || ( u === 'y' && v === 'z' ) ) {
+
+			w = 'x';
+			gridX = scope.depthSegments;
+
+		}
+
+		var gridX1 = gridX + 1,
+		gridY1 = gridY + 1,
+		segment_width = width / gridX,
+		segment_height = height / gridY,
+		normal = new THREE.Vector3();
+
+		normal[ w ] = depth > 0 ? 1 : - 1;
+
+		for ( iy = 0; iy < gridY1; iy ++ ) {
+
+			for ( ix = 0; ix < gridX1; ix ++ ) {
+
+				var vector = new THREE.Vector3();
+				vector[ u ] = ( ix * segment_width - width_half ) * udir;
+				vector[ v ] = ( iy * segment_height - height_half ) * vdir;
+				vector[ w ] = depth;
+
+				scope.vertices.push( vector );
+
+			}
+
+		}
+
+		for ( iy = 0; iy < gridY; iy ++ ) {
+
+			for ( ix = 0; ix < gridX; ix ++ ) {
+
+				var a = ix + gridX1 * iy;
+				var b = ix + gridX1 * ( iy + 1 );
+				var c = ( ix + 1 ) + gridX1 * ( iy + 1 );
+				var d = ( ix + 1 ) + gridX1 * iy;
+
+				var uva = new THREE.Vector2( ix / gridX, 1 - iy / gridY );
+				var uvb = new THREE.Vector2( ix / gridX, 1 - ( iy + 1 ) / gridY );
+				var uvc = new THREE.Vector2( ( ix + 1 ) / gridX, 1 - ( iy + 1 ) / gridY );
+				var uvd = new THREE.Vector2( ( ix + 1 ) / gridX, 1 - iy / gridY );
+
+				var face = new THREE.Face3( a + offset, b + offset, d + offset );
+				face.normal.copy( normal );
+				face.vertexNormals.push( normal.clone(), normal.clone(), normal.clone() );
+				face.materialIndex = materialIndex;
+
+				scope.faces.push( face );
+				scope.faceVertexUvs[ 0 ].push( [ uva, uvb, uvd ] );
+
+				face = new THREE.Face3( b + offset, c + offset, d + offset );
+				face.normal.copy( normal );
+				face.vertexNormals.push( normal.clone(), normal.clone(), normal.clone() );
+				face.materialIndex = materialIndex;
+
+				scope.faces.push( face );
+				scope.faceVertexUvs[ 0 ].push( [ uvb.clone(), uvc, uvd.clone() ] );
+
+			}
+
+		}
+
+	}
+
+	this.mergeVertices();
+
+};
+
+THREE.BoxGeometry.prototype = Object.create( THREE.Geometry.prototype );
+THREE.BoxGeometry.prototype.constructor = THREE.BoxGeometry;
+
+THREE.BoxGeometry.prototype.clone = function () {
+
+	var parameters = this.parameters;
+
+	return new THREE.BoxGeometry(
+		parameters.width,
+		parameters.height,
+		parameters.depth,
+		parameters.widthSegments,
+		parameters.heightSegments,
+		parameters.depthSegments
+	);
+
+};
+
+THREE.CubeGeometry = THREE.BoxGeometry; // backwards compatibility
+
+// File:src/extras/geometries/SphereGeometry.js
+
+/**
+ * @author mrdoob / http://mrdoob.com/
+ */
+
+THREE.SphereGeometry = function ( radius, widthSegments, heightSegments, phiStart, phiLength, thetaStart, thetaLength ) {
+
+	THREE.Geometry.call( this );
+
+	this.type = 'SphereGeometry';
+
+	this.parameters = {
+		radius: radius,
+		widthSegments: widthSegments,
+		heightSegments: heightSegments,
+		phiStart: phiStart,
+		phiLength: phiLength,
+		thetaStart: thetaStart,
+		thetaLength: thetaLength
+	};
+
+	this.fromBufferGeometry( new THREE.SphereBufferGeometry( radius, widthSegments, heightSegments, phiStart, phiLength, thetaStart, thetaLength ) );
+
+};
+
+THREE.SphereGeometry.prototype = Object.create( THREE.Geometry.prototype );
+THREE.SphereGeometry.prototype.constructor = THREE.SphereGeometry;
+
+THREE.SphereGeometry.prototype.clone = function () {
+
+	var parameters = this.parameters;
+
+	return new THREE.SphereGeometry(
+		parameters.radius,
+		parameters.widthSegments,
+		parameters.heightSegments,
+		parameters.phiStart,
+		parameters.phiLength,
+		parameters.thetaStart,
+		parameters.thetaLength
+	);
+
+};
+
+// File:src/extras/geometries/SphereBufferGeometry.js
+
+/**
+ * @author benaadams / https://twitter.com/ben_a_adams
+ * based on THREE.SphereGeometry
+ */
+
+THREE.SphereBufferGeometry = function ( radius, widthSegments, heightSegments, phiStart, phiLength, thetaStart, thetaLength ) {
+
+	THREE.BufferGeometry.call( this );
+
+	this.type = 'SphereBufferGeometry';
+
+	this.parameters = {
+		radius: radius,
+		widthSegments: widthSegments,
+		heightSegments: heightSegments,
+		phiStart: phiStart,
+		phiLength: phiLength,
+		thetaStart: thetaStart,
+		thetaLength: thetaLength
+	};
+
+	radius = radius || 50;
+
+	widthSegments = Math.max( 3, Math.floor( widthSegments ) || 8 );
+	heightSegments = Math.max( 2, Math.floor( heightSegments ) || 6 );
+
+	phiStart = phiStart !== undefined ? phiStart : 0;
+	phiLength = phiLength !== undefined ? phiLength : Math.PI * 2;
+
+	thetaStart = thetaStart !== undefined ? thetaStart : 0;
+	thetaLength = thetaLength !== undefined ? thetaLength : Math.PI;
+
+	var thetaEnd = thetaStart + thetaLength;
+
+	var vertexCount = ( ( widthSegments + 1 ) * ( heightSegments + 1 ) );
+
+	var positions = new THREE.BufferAttribute( new Float32Array( vertexCount * 3 ), 3 );
+	var normals = new THREE.BufferAttribute( new Float32Array( vertexCount * 3 ), 3 );
+	var uvs = new THREE.BufferAttribute( new Float32Array( vertexCount * 2 ), 2 );
+
+	var index = 0, vertices = [], normal = new THREE.Vector3();
+
+	for ( var y = 0; y <= heightSegments; y ++ ) {
+
+		var verticesRow = [];
+
+		var v = y / heightSegments;
+
+		for ( var x = 0; x <= widthSegments; x ++ ) {
+
+			var u = x / widthSegments;
+
+			var px = - radius * Math.cos( phiStart + u * phiLength ) * Math.sin( thetaStart + v * thetaLength );
+			var py = radius * Math.cos( thetaStart + v * thetaLength );
+			var pz = radius * Math.sin( phiStart + u * phiLength ) * Math.sin( thetaStart + v * thetaLength );
+
+			normal.set( px, py, pz ).normalize();
+
+			positions.setXYZ( index, px, py, pz );
+			normals.setXYZ( index, normal.x, normal.y, normal.z );
+			uvs.setXY( index, u, 1 - v );
+
+			verticesRow.push( index );
+
+			index ++;
+
+		}
+
+		vertices.push( verticesRow );
+
+	}
+
+	var indices = [];
+
+	for ( var y = 0; y < heightSegments; y ++ ) {
+
+		for ( var x = 0; x < widthSegments; x ++ ) {
+
+			var v1 = vertices[ y ][ x + 1 ];
+			var v2 = vertices[ y ][ x ];
+			var v3 = vertices[ y + 1 ][ x ];
+			var v4 = vertices[ y + 1 ][ x + 1 ];
+
+			if ( y !== 0 || thetaStart > 0 ) indices.push( v1, v2, v4 );
+			if ( y !== heightSegments - 1 || thetaEnd < Math.PI ) indices.push( v2, v3, v4 );
+
+		}
+
+	}
+
+	this.setIndex( new ( positions.count > 65535 ? THREE.Uint32Attribute : THREE.Uint16Attribute )( indices, 1 ) );
+	this.addAttribute( 'position', positions );
+	this.addAttribute( 'normal', normals );
+	this.addAttribute( 'uv', uvs );
+
+	this.boundingSphere = new THREE.Sphere( new THREE.Vector3(), radius );
+
+};
+
+THREE.SphereBufferGeometry.prototype = Object.create( THREE.BufferGeometry.prototype );
+THREE.SphereBufferGeometry.prototype.constructor = THREE.SphereBufferGeometry;
+
+THREE.SphereBufferGeometry.prototype.clone = function () {
+
+	var parameters = this.parameters;
+
+	return new THREE.SphereBufferGeometry(
+		parameters.radius,
+		parameters.widthSegments,
+		parameters.heightSegments,
+		parameters.phiStart,
+		parameters.phiLength,
+		parameters.thetaStart,
+		parameters.thetaLength
+	);
+
+};
+
+// File:src/extras/helpers/AxisHelper.js
+
+/**
+ * @author sroucheray / http://sroucheray.org/
+ * @author mrdoob / http://mrdoob.com/
+ */
+
+THREE.AxisHelper = function ( size ) {
+
+	size = size || 1;
+
+	var vertices = new Float32Array( [
+		0, 0, 0,  size, 0, 0,
+		0, 0, 0,  0, size, 0,
+		0, 0, 0,  0, 0, size
+	] );
+
+	var colors = new Float32Array( [
+		1, 0, 0,  1, 0.6, 0,
+		0, 1, 0,  0.6, 1, 0,
+		0, 0, 1,  0, 0.6, 1
+	] );
+
+	var geometry = new THREE.BufferGeometry();
+	geometry.addAttribute( 'position', new THREE.BufferAttribute( vertices, 3 ) );
+	geometry.addAttribute( 'color', new THREE.BufferAttribute( colors, 3 ) );
+
+	var material = new THREE.LineBasicMaterial( { vertexColors: THREE.VertexColors } );
+
+	THREE.LineSegments.call( this, geometry, material );
+
+};
+
+THREE.AxisHelper.prototype = Object.create( THREE.LineSegments.prototype );
+THREE.AxisHelper.prototype.constructor = THREE.AxisHelper;
+
+// File:examples/js/controls/OrbitControls.js
+
+/**
+ * @author qiao / https://github.com/qiao
+ * @author mrdoob / http://mrdoob.com
+ * @author alteredq / http://alteredqualia.com/
+ * @author WestLangley / http://github.com/WestLangley
+ * @author erich666 / http://erichaines.com
+ */
+/*global THREE, console */
+
+( function () {
+
+	function OrbitConstraint ( object ) {
+
+		this.object = object;
+
+		// "target" sets the location of focus, where the object orbits around
+		// and where it pans with respect to.
+		this.target = new THREE.Vector3();
+
+		// Limits to how far you can dolly in and out ( PerspectiveCamera only )
+		this.minDistance = 0;
+		this.maxDistance = Infinity;
+
+		// Limits to how far you can zoom in and out ( OrthographicCamera only )
+		this.minZoom = 0;
+		this.maxZoom = Infinity;
+
+		// How far you can orbit vertically, upper and lower limits.
+		// Range is 0 to Math.PI radians.
+		this.minPolarAngle = 0; // radians
+		this.maxPolarAngle = Math.PI; // radians
+
+		// How far you can orbit horizontally, upper and lower limits.
+		// If set, must be a sub-interval of the interval [ - Math.PI, Math.PI ].
+		this.minAzimuthAngle = - Infinity; // radians
+		this.maxAzimuthAngle = Infinity; // radians
+
+		// Set to true to enable damping (inertia)
+		// If damping is enabled, you must call controls.update() in your animation loop
+		this.enableDamping = false;
+		this.dampingFactor = 0.25;
+
+		////////////
+		// internals
+
+		var scope = this;
+
+		var EPS = 0.000001;
+
+		// Current position in spherical coordinate system.
+		var theta;
+		var phi;
+
+		// Pending changes
+		var phiDelta = 0;
+		var thetaDelta = 0;
+		var scale = 1;
+		var panOffset = new THREE.Vector3();
+		var zoomChanged = false;
+
+		// API
+
+		this.getPolarAngle = function () {
+
+			return phi;
+
+		};
+
+		this.getAzimuthalAngle = function () {
+
+			return theta;
+
+		};
+
+		this.rotateLeft = function ( angle ) {
+
+			thetaDelta -= angle;
+
+		};
+
+		this.rotateUp = function ( angle ) {
+
+			phiDelta -= angle;
+
+		};
+
+		// pass in distance in world space to move left
+		this.panLeft = function() {
+
+			var v = new THREE.Vector3();
+
+			return function panLeft ( distance ) {
+
+				var te = this.object.matrix.elements;
+
+				// get X column of matrix
+				v.set( te[ 0 ], te[ 1 ], te[ 2 ] );
+				v.multiplyScalar( - distance );
+
+				panOffset.add( v );
+
+			};
+
+		}();
+
+		// pass in distance in world space to move up
+		this.panUp = function() {
+
+			var v = new THREE.Vector3();
+
+			return function panUp ( distance ) {
+
+				var te = this.object.matrix.elements;
+
+				// get Y column of matrix
+				v.set( te[ 4 ], te[ 5 ], te[ 6 ] );
+				v.multiplyScalar( distance );
+
+				panOffset.add( v );
+
+			};
+
+		}();
+
+		// pass in x,y of change desired in pixel space,
+		// right and down are positive
+		this.pan = function ( deltaX, deltaY, screenWidth, screenHeight ) {
+
+			if ( scope.object instanceof THREE.PerspectiveCamera ) {
+
+				// perspective
+				var position = scope.object.position;
+				var offset = position.clone().sub( scope.target );
+				var targetDistance = offset.length();
+
+				// half of the fov is center to top of screen
+				targetDistance *= Math.tan( ( scope.object.fov / 2 ) * Math.PI / 180.0 );
+
+				// we actually don't use screenWidth, since perspective camera is fixed to screen height
+				scope.panLeft( 2 * deltaX * targetDistance / screenHeight );
+				scope.panUp( 2 * deltaY * targetDistance / screenHeight );
+
+			} else if ( scope.object instanceof THREE.OrthographicCamera ) {
+
+				// orthographic
+				scope.panLeft( deltaX * ( scope.object.right - scope.object.left ) / screenWidth );
+				scope.panUp( deltaY * ( scope.object.top - scope.object.bottom ) / screenHeight );
+
+			} else {
+
+				// camera neither orthographic or perspective
+				console.warn( 'WARNING: OrbitControls.js encountered an unknown camera type - pan disabled.' );
+
+			}
+
+		};
+
+		this.dollyIn = function ( dollyScale ) {
+
+			if ( scope.object instanceof THREE.PerspectiveCamera ) {
+
+				scale /= dollyScale;
+
+			} else if ( scope.object instanceof THREE.OrthographicCamera ) {
+
+				scope.object.zoom = Math.max( this.minZoom, Math.min( this.maxZoom, this.object.zoom * dollyScale ) );
+				scope.object.updateProjectionMatrix();
+				zoomChanged = true;
+
+			} else {
+
+				console.warn( 'WARNING: OrbitControls.js encountered an unknown camera type - dolly/zoom disabled.' );
+
+			}
+
+		};
+
+		this.dollyOut = function ( dollyScale ) {
+
+			if ( scope.object instanceof THREE.PerspectiveCamera ) {
+
+				scale *= dollyScale;
+
+			} else if ( scope.object instanceof THREE.OrthographicCamera ) {
+
+				scope.object.zoom = Math.max( this.minZoom, Math.min( this.maxZoom, this.object.zoom / dollyScale ) );
+				scope.object.updateProjectionMatrix();
+				zoomChanged = true;
+
+			} else {
+
+				console.warn( 'WARNING: OrbitControls.js encountered an unknown camera type - dolly/zoom disabled.' );
+
+			}
+
+		};
+
+		this.update = function() {
+
+			var offset = new THREE.Vector3();
+
+			// so camera.up is the orbit axis
+			var quat = new THREE.Quaternion().setFromUnitVectors( object.up, new THREE.Vector3( 0, 1, 0 ) );
+			var quatInverse = quat.clone().inverse();
+
+			var lastPosition = new THREE.Vector3();
+			var lastQuaternion = new THREE.Quaternion();
+
+			return function () {
+
+				var position = this.object.position;
+
+				offset.copy( position ).sub( this.target );
+
+				// rotate offset to "y-axis-is-up" space
+				offset.applyQuaternion( quat );
+
+				// angle from z-axis around y-axis
+
+				theta = Math.atan2( offset.x, offset.z );
+
+				// angle from y-axis
+
+				phi = Math.atan2( Math.sqrt( offset.x * offset.x + offset.z * offset.z ), offset.y );
+
+				theta += thetaDelta;
+				phi += phiDelta;
+
+				// restrict theta to be between desired limits
+				theta = Math.max( this.minAzimuthAngle, Math.min( this.maxAzimuthAngle, theta ) );
+
+				// restrict phi to be between desired limits
+				phi = Math.max( this.minPolarAngle, Math.min( this.maxPolarAngle, phi ) );
+
+				// restrict phi to be betwee EPS and PI-EPS
+				phi = Math.max( EPS, Math.min( Math.PI - EPS, phi ) );
+
+				var radius = offset.length() * scale;
+
+				// restrict radius to be between desired limits
+				radius = Math.max( this.minDistance, Math.min( this.maxDistance, radius ) );
+
+				// move target to panned location
+				this.target.add( panOffset );
+
+				offset.x = radius * Math.sin( phi ) * Math.sin( theta );
+				offset.y = radius * Math.cos( phi );
+				offset.z = radius * Math.sin( phi ) * Math.cos( theta );
+
+				// rotate offset back to "camera-up-vector-is-up" space
+				offset.applyQuaternion( quatInverse );
+
+				position.copy( this.target ).add( offset );
+
+				this.object.lookAt( this.target );
+
+				if ( this.enableDamping === true ) {
+
+					thetaDelta *= ( 1 - this.dampingFactor );
+					phiDelta *= ( 1 - this.dampingFactor );
+
+				} else {
+
+					thetaDelta = 0;
+					phiDelta = 0;
+
+				}
+
+				scale = 1;
+				panOffset.set( 0, 0, 0 );
+
+				// update condition is:
+				// min(camera displacement, camera rotation in radians)^2 > EPS
+				// using small-angle approximation cos(x/2) = 1 - x^2 / 8
+
+				if ( zoomChanged ||
+					 lastPosition.distanceToSquared( this.object.position ) > EPS ||
+				    8 * ( 1 - lastQuaternion.dot( this.object.quaternion ) ) > EPS ) {
+
+					lastPosition.copy( this.object.position );
+					lastQuaternion.copy( this.object.quaternion );
+					zoomChanged = false;
+
+					return true;
+
+				}
+
+				return false;
+
+			};
+
+		}();
+
+	};
+
+
+	// This set of controls performs orbiting, dollying (zooming), and panning. It maintains
+	// the "up" direction as +Y, unlike the TrackballControls. Touch on tablet and phones is
+	// supported.
+	//
+	//    Orbit - left mouse / touch: one finger move
+	//    Zoom - middle mouse, or mousewheel / touch: two finger spread or squish
+	//    Pan - right mouse, or arrow keys / touch: three finter swipe
+
+	THREE.OrbitControls = function ( object, domElement ) {
+
+		var constraint = new OrbitConstraint( object );
+
+		this.domElement = ( domElement !== undefined ) ? domElement : document;
+
+		// API
+
+		Object.defineProperty( this, 'constraint', {
+
+			get: function() {
+
+				return constraint;
+
+			}
+
+		} );
+
+		this.getPolarAngle = function () {
+
+			return constraint.getPolarAngle();
+
+		};
+
+		this.getAzimuthalAngle = function () {
+
+			return constraint.getAzimuthalAngle();
+
+		};
+
+		// Set to false to disable this control
+		this.enabled = true;
+
+		// center is old, deprecated; use "target" instead
+		this.center = this.target;
+
+		// This option actually enables dollying in and out; left as "zoom" for
+		// backwards compatibility.
+		// Set to false to disable zooming
+		this.enableZoom = true;
+		this.zoomSpeed = 1.0;
+
+		// Set to false to disable rotating
+		this.enableRotate = true;
+		this.rotateSpeed = 1.0;
+
+		// Set to false to disable panning
+		this.enablePan = true;
+		this.keyPanSpeed = 7.0;	// pixels moved per arrow key push
+
+		// Set to true to automatically rotate around the target
+		// If auto-rotate is enabled, you must call controls.update() in your animation loop
+		this.autoRotate = false;
+		this.autoRotateSpeed = 2.0; // 30 seconds per round when fps is 60
+
+		// Set to false to disable use of the keys
+		this.enableKeys = true;
+
+		// The four arrow keys
+		this.keys = { LEFT: 37, UP: 38, RIGHT: 39, BOTTOM: 40 };
+
+		// Mouse buttons
+		this.mouseButtons = { ORBIT: THREE.MOUSE.LEFT, ZOOM: THREE.MOUSE.MIDDLE, PAN: THREE.MOUSE.RIGHT };
+
+		////////////
+		// internals
+
+		var scope = this;
+
+		var rotateStart = new THREE.Vector2();
+		var rotateEnd = new THREE.Vector2();
+		var rotateDelta = new THREE.Vector2();
+
+		var panStart = new THREE.Vector2();
+		var panEnd = new THREE.Vector2();
+		var panDelta = new THREE.Vector2();
+
+		var dollyStart = new THREE.Vector2();
+		var dollyEnd = new THREE.Vector2();
+		var dollyDelta = new THREE.Vector2();
+
+		var STATE = { NONE : - 1, ROTATE : 0, DOLLY : 1, PAN : 2, TOUCH_ROTATE : 3, TOUCH_DOLLY : 4, TOUCH_PAN : 5 };
+
+		var state = STATE.NONE;
+
+		// for reset
+
+		this.target0 = this.target.clone();
+		this.position0 = this.object.position.clone();
+		this.zoom0 = this.object.zoom;
+
+		// events
+
+		var changeEvent = { type: 'change' };
+		var startEvent = { type: 'start' };
+		var endEvent = { type: 'end' };
+
+		// pass in x,y of change desired in pixel space,
+		// right and down are positive
+		function pan( deltaX, deltaY ) {
+
+			var element = scope.domElement === document ? scope.domElement.body : scope.domElement;
+
+			constraint.pan( deltaX, deltaY, element.clientWidth, element.clientHeight );
+
+		}
+
+		this.update = function () {
+
+			if ( this.autoRotate && state === STATE.NONE ) {
+
+				constraint.rotateLeft( getAutoRotationAngle() );
+
+			}
+
+			if ( constraint.update() === true ) {
+
+				this.dispatchEvent( changeEvent );
+
+			}
+
+		};
+
+		this.reset = function () {
+
+			state = STATE.NONE;
+
+			this.target.copy( this.target0 );
+			this.object.position.copy( this.position0 );
+			this.object.zoom = this.zoom0;
+
+			this.object.updateProjectionMatrix();
+			this.dispatchEvent( changeEvent );
+
+			this.update();
+
+		};
+
+		function getAutoRotationAngle() {
+
+			return 2 * Math.PI / 60 / 60 * scope.autoRotateSpeed;
+
+		}
+
+		function getZoomScale() {
+
+			return Math.pow( 0.95, scope.zoomSpeed );
+
+		}
+
+		function onMouseDown( event ) {
+
+			if ( scope.enabled === false ) return;
+
+			event.preventDefault();
+
+			if ( event.button === scope.mouseButtons.ORBIT ) {
+
+				if ( scope.enableRotate === false ) return;
+
+				state = STATE.ROTATE;
+
+				rotateStart.set( event.clientX, event.clientY );
+
+			} else if ( event.button === scope.mouseButtons.ZOOM ) {
+
+				if ( scope.enableZoom === false ) return;
+
+				state = STATE.DOLLY;
+
+				dollyStart.set( event.clientX, event.clientY );
+
+			} else if ( event.button === scope.mouseButtons.PAN ) {
+
+				if ( scope.enablePan === false ) return;
+
+				state = STATE.PAN;
+
+				panStart.set( event.clientX, event.clientY );
+
+			}
+
+			if ( state !== STATE.NONE ) {
+
+				document.addEventListener( 'mousemove', onMouseMove, false );
+				document.addEventListener( 'mouseup', onMouseUp, false );
+				scope.dispatchEvent( startEvent );
+
+			}
+
+		}
+
+		function onMouseMove( event ) {
+
+			if ( scope.enabled === false ) return;
+
+			event.preventDefault();
+
+			var element = scope.domElement === document ? scope.domElement.body : scope.domElement;
+
+			if ( state === STATE.ROTATE ) {
+
+				if ( scope.enableRotate === false ) return;
+
+				rotateEnd.set( event.clientX, event.clientY );
+				rotateDelta.subVectors( rotateEnd, rotateStart );
+
+				// rotating across whole screen goes 360 degrees around
+				constraint.rotateLeft( 2 * Math.PI * rotateDelta.x / element.clientWidth * scope.rotateSpeed );
+
+				// rotating up and down along whole screen attempts to go 360, but limited to 180
+				constraint.rotateUp( 2 * Math.PI * rotateDelta.y / element.clientHeight * scope.rotateSpeed );
+
+				rotateStart.copy( rotateEnd );
+
+			} else if ( state === STATE.DOLLY ) {
+
+				if ( scope.enableZoom === false ) return;
+
+				dollyEnd.set( event.clientX, event.clientY );
+				dollyDelta.subVectors( dollyEnd, dollyStart );
+
+				if ( dollyDelta.y > 0 ) {
+
+					constraint.dollyIn( getZoomScale() );
+
+				} else if ( dollyDelta.y < 0 ) {
+
+					constraint.dollyOut( getZoomScale() );
+
+				}
+
+				dollyStart.copy( dollyEnd );
+
+			} else if ( state === STATE.PAN ) {
+
+				if ( scope.enablePan === false ) return;
+
+				panEnd.set( event.clientX, event.clientY );
+				panDelta.subVectors( panEnd, panStart );
+
+				pan( panDelta.x, panDelta.y );
+
+				panStart.copy( panEnd );
+
+			}
+
+			if ( state !== STATE.NONE ) scope.update();
+
+		}
+
+		function onMouseUp( /* event */ ) {
+
+			if ( scope.enabled === false ) return;
+
+			document.removeEventListener( 'mousemove', onMouseMove, false );
+			document.removeEventListener( 'mouseup', onMouseUp, false );
+			scope.dispatchEvent( endEvent );
+			state = STATE.NONE;
+
+		}
+
+		function onMouseWheel( event ) {
+
+			if ( scope.enabled === false || scope.enableZoom === false || state !== STATE.NONE ) return;
+
+			event.preventDefault();
+			event.stopPropagation();
+
+			var delta = 0;
+
+			if ( event.wheelDelta !== undefined ) {
+
+				// WebKit / Opera / Explorer 9
+
+				delta = event.wheelDelta;
+
+			} else if ( event.detail !== undefined ) {
+
+				// Firefox
+
+				delta = - event.detail;
+
+			}
+
+			if ( delta > 0 ) {
+
+				constraint.dollyOut( getZoomScale() );
+
+			} else if ( delta < 0 ) {
+
+				constraint.dollyIn( getZoomScale() );
+
+			}
+
+			scope.update();
+			scope.dispatchEvent( startEvent );
+			scope.dispatchEvent( endEvent );
+
+		}
+
+		function onKeyDown( event ) {
+
+			if ( scope.enabled === false || scope.enableKeys === false || scope.enablePan === false ) return;
+
+			switch ( event.keyCode ) {
+
+				case scope.keys.UP:
+					pan( 0, scope.keyPanSpeed );
+					scope.update();
+					break;
+
+				case scope.keys.BOTTOM:
+					pan( 0, - scope.keyPanSpeed );
+					scope.update();
+					break;
+
+				case scope.keys.LEFT:
+					pan( scope.keyPanSpeed, 0 );
+					scope.update();
+					break;
+
+				case scope.keys.RIGHT:
+					pan( - scope.keyPanSpeed, 0 );
+					scope.update();
+					break;
+
+			}
+
+		}
+
+		function touchstart( event ) {
+
+			if ( scope.enabled === false ) return;
+
+			switch ( event.touches.length ) {
+
+				case 1:	// one-fingered touch: rotate
+
+					if ( scope.enableRotate === false ) return;
+
+					state = STATE.TOUCH_ROTATE;
+
+					rotateStart.set( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY );
+					break;
+
+				case 2:	// two-fingered touch: dolly
+
+					if ( scope.enableZoom === false ) return;
+
+					state = STATE.TOUCH_DOLLY;
+
+					var dx = event.touches[ 0 ].pageX - event.touches[ 1 ].pageX;
+					var dy = event.touches[ 0 ].pageY - event.touches[ 1 ].pageY;
+					var distance = Math.sqrt( dx * dx + dy * dy );
+					dollyStart.set( 0, distance );
+					break;
+
+				case 3: // three-fingered touch: pan
+
+					if ( scope.enablePan === false ) return;
+
+					state = STATE.TOUCH_PAN;
+
+					panStart.set( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY );
+					break;
+
+				default:
+
+					state = STATE.NONE;
+
+			}
+
+			if ( state !== STATE.NONE ) scope.dispatchEvent( startEvent );
+
+		}
+
+		function touchmove( event ) {
+
+			if ( scope.enabled === false ) return;
+
+			event.preventDefault();
+			event.stopPropagation();
+
+			var element = scope.domElement === document ? scope.domElement.body : scope.domElement;
+
+			switch ( event.touches.length ) {
+
+				case 1: // one-fingered touch: rotate
+
+					if ( scope.enableRotate === false ) return;
+					if ( state !== STATE.TOUCH_ROTATE ) return;
+
+					rotateEnd.set( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY );
+					rotateDelta.subVectors( rotateEnd, rotateStart );
+
+					// rotating across whole screen goes 360 degrees around
+					constraint.rotateLeft( 2 * Math.PI * rotateDelta.x / element.clientWidth * scope.rotateSpeed );
+					// rotating up and down along whole screen attempts to go 360, but limited to 180
+					constraint.rotateUp( 2 * Math.PI * rotateDelta.y / element.clientHeight * scope.rotateSpeed );
+
+					rotateStart.copy( rotateEnd );
+
+					scope.update();
+					break;
+
+				case 2: // two-fingered touch: dolly
+
+					if ( scope.enableZoom === false ) return;
+					if ( state !== STATE.TOUCH_DOLLY ) return;
+
+					var dx = event.touches[ 0 ].pageX - event.touches[ 1 ].pageX;
+					var dy = event.touches[ 0 ].pageY - event.touches[ 1 ].pageY;
+					var distance = Math.sqrt( dx * dx + dy * dy );
+
+					dollyEnd.set( 0, distance );
+					dollyDelta.subVectors( dollyEnd, dollyStart );
+
+					if ( dollyDelta.y > 0 ) {
+
+						constraint.dollyOut( getZoomScale() );
+
+					} else if ( dollyDelta.y < 0 ) {
+
+						constraint.dollyIn( getZoomScale() );
+
+					}
+
+					dollyStart.copy( dollyEnd );
+
+					scope.update();
+					break;
+
+				case 3: // three-fingered touch: pan
+
+					if ( scope.enablePan === false ) return;
+					if ( state !== STATE.TOUCH_PAN ) return;
+
+					panEnd.set( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY );
+					panDelta.subVectors( panEnd, panStart );
+
+					pan( panDelta.x, panDelta.y );
+
+					panStart.copy( panEnd );
+
+					scope.update();
+					break;
+
+				default:
+
+					state = STATE.NONE;
+
+			}
+
+		}
+
+		function touchend( /* event */ ) {
+
+			if ( scope.enabled === false ) return;
+
+			scope.dispatchEvent( endEvent );
+			state = STATE.NONE;
+
+		}
+
+		function contextmenu( event ) {
+
+			event.preventDefault();
+
+		}
+
+		this.dispose = function() {
+
+			this.domElement.removeEventListener( 'contextmenu', contextmenu, false );
+			this.domElement.removeEventListener( 'mousedown', onMouseDown, false );
+			this.domElement.removeEventListener( 'mousewheel', onMouseWheel, false );
+			this.domElement.removeEventListener( 'MozMousePixelScroll', onMouseWheel, false ); // firefox
+
+			this.domElement.removeEventListener( 'touchstart', touchstart, false );
+			this.domElement.removeEventListener( 'touchend', touchend, false );
+			this.domElement.removeEventListener( 'touchmove', touchmove, false );
+
+			document.removeEventListener( 'mousemove', onMouseMove, false );
+			document.removeEventListener( 'mouseup', onMouseUp, false );
+
+			window.removeEventListener( 'keydown', onKeyDown, false );
+
+		}
+
+		this.domElement.addEventListener( 'contextmenu', contextmenu, false );
+
+		this.domElement.addEventListener( 'mousedown', onMouseDown, false );
+		this.domElement.addEventListener( 'mousewheel', onMouseWheel, false );
+		this.domElement.addEventListener( 'MozMousePixelScroll', onMouseWheel, false ); // firefox
+
+		this.domElement.addEventListener( 'touchstart', touchstart, false );
+		this.domElement.addEventListener( 'touchend', touchend, false );
+		this.domElement.addEventListener( 'touchmove', touchmove, false );
+
+		window.addEventListener( 'keydown', onKeyDown, false );
+
+		// force an update at start
+		this.update();
+
+	};
+
+	THREE.OrbitControls.prototype = Object.create( THREE.EventDispatcher.prototype );
+	THREE.OrbitControls.prototype.constructor = THREE.OrbitControls;
+
+	Object.defineProperties( THREE.OrbitControls.prototype, {
+
+		object: {
+
+			get: function () {
+
+				return this.constraint.object;
+
+			}
+
+		},
+
+		target: {
+
+			get: function () {
+
+				return this.constraint.target;
+
+			},
+
+			set: function ( value ) {
+
+				console.warn( 'THREE.OrbitControls: target is now immutable. Use target.set() instead.' );
+				this.constraint.target.copy( value );
+
+			}
+
+		},
+
+		minDistance : {
+
+			get: function () {
+
+				return this.constraint.minDistance;
+
+			},
+
+			set: function ( value ) {
+
+				this.constraint.minDistance = value;
+
+			}
+
+		},
+
+		maxDistance : {
+
+			get: function () {
+
+				return this.constraint.maxDistance;
+
+			},
+
+			set: function ( value ) {
+
+				this.constraint.maxDistance = value;
+
+			}
+
+		},
+
+		minZoom : {
+
+			get: function () {
+
+				return this.constraint.minZoom;
+
+			},
+
+			set: function ( value ) {
+
+				this.constraint.minZoom = value;
+
+			}
+
+		},
+
+		maxZoom : {
+
+			get: function () {
+
+				return this.constraint.maxZoom;
+
+			},
+
+			set: function ( value ) {
+
+				this.constraint.maxZoom = value;
+
+			}
+
+		},
+
+		minPolarAngle : {
+
+			get: function () {
+
+				return this.constraint.minPolarAngle;
+
+			},
+
+			set: function ( value ) {
+
+				this.constraint.minPolarAngle = value;
+
+			}
+
+		},
+
+		maxPolarAngle : {
+
+			get: function () {
+
+				return this.constraint.maxPolarAngle;
+
+			},
+
+			set: function ( value ) {
+
+				this.constraint.maxPolarAngle = value;
+
+			}
+
+		},
+
+		minAzimuthAngle : {
+
+			get: function () {
+
+				return this.constraint.minAzimuthAngle;
+
+			},
+
+			set: function ( value ) {
+
+				this.constraint.minAzimuthAngle = value;
+
+			}
+
+		},
+
+		maxAzimuthAngle : {
+
+			get: function () {
+
+				return this.constraint.maxAzimuthAngle;
+
+			},
+
+			set: function ( value ) {
+
+				this.constraint.maxAzimuthAngle = value;
+
+			}
+
+		},
+
+		enableDamping : {
+
+			get: function () {
+
+				return this.constraint.enableDamping;
+
+			},
+
+			set: function ( value ) {
+
+				this.constraint.enableDamping = value;
+
+			}
+
+		},
+
+		dampingFactor : {
+
+			get: function () {
+
+				return this.constraint.dampingFactor;
+
+			},
+
+			set: function ( value ) {
+
+				this.constraint.dampingFactor = value;
+
+			}
+
+		},
+
+		// backward compatibility
+
+		noZoom: {
+
+			get: function () {
+
+				console.warn( 'THREE.OrbitControls: .noZoom has been deprecated. Use .enableZoom instead.' );
+				return ! this.enableZoom;
+
+			},
+
+			set: function ( value ) {
+
+				console.warn( 'THREE.OrbitControls: .noZoom has been deprecated. Use .enableZoom instead.' );
+				this.enableZoom = ! value;
+
+			}
+
+		},
+
+		noRotate: {
+
+			get: function () {
+
+				console.warn( 'THREE.OrbitControls: .noRotate has been deprecated. Use .enableRotate instead.' );
+				return ! this.enableRotate;
+
+			},
+
+			set: function ( value ) {
+
+				console.warn( 'THREE.OrbitControls: .noRotate has been deprecated. Use .enableRotate instead.' );
+				this.enableRotate = ! value;
+
+			}
+
+		},
+
+		noPan: {
+
+			get: function () {
+
+				console.warn( 'THREE.OrbitControls: .noPan has been deprecated. Use .enablePan instead.' );
+				return ! this.enablePan;
+
+			},
+
+			set: function ( value ) {
+
+				console.warn( 'THREE.OrbitControls: .noPan has been deprecated. Use .enablePan instead.' );
+				this.enablePan = ! value;
+
+			}
+
+		},
+
+		noKeys: {
+
+			get: function () {
+
+				console.warn( 'THREE.OrbitControls: .noKeys has been deprecated. Use .enableKeys instead.' );
+				return ! this.enableKeys;
+
+			},
+
+			set: function ( value ) {
+
+				console.warn( 'THREE.OrbitControls: .noKeys has been deprecated. Use .enableKeys instead.' );
+				this.enableKeys = ! value;
+
+			}
+
+		},
+
+		staticMoving : {
+
+			get: function () {
+
+				console.warn( 'THREE.OrbitControls: .staticMoving has been deprecated. Use .enableDamping instead.' );
+				return ! this.constraint.enableDamping;
+
+			},
+
+			set: function ( value ) {
+
+				console.warn( 'THREE.OrbitControls: .staticMoving has been deprecated. Use .enableDamping instead.' );
+				this.constraint.enableDamping = ! value;
+
+			}
+
+		},
+
+		dynamicDampingFactor : {
+
+			get: function () {
+
+				console.warn( 'THREE.OrbitControls: .dynamicDampingFactor has been renamed. Use .dampingFactor instead.' );
+				return this.constraint.dampingFactor;
+
+			},
+
+			set: function ( value ) {
+
+				console.warn( 'THREE.OrbitControls: .dynamicDampingFactor has been renamed. Use .dampingFactor instead.' );
+				this.constraint.dampingFactor = value;
+
+			}
+
+		}
+
+	} );
+
+}() );
+
+// File:examples/js/controls/TrackballControls.js
+
+/**
+ * @author Eberhard Graether / http://egraether.com/
+ * @author Mark Lundin 	/ http://mark-lundin.com
+ * @author Simone Manini / http://daron1337.github.io
+ * @author Luca Antiga 	/ http://lantiga.github.io
+ */
+
+THREE.TrackballControls = function ( object, domElement ) {
+
+	var _this = this;
+	var STATE = { NONE: - 1, ROTATE: 0, ZOOM: 1, PAN: 2, TOUCH_ROTATE: 3, TOUCH_ZOOM_PAN: 4 };
+
+	this.object = object;
+	this.domElement = ( domElement !== undefined ) ? domElement : document;
+
+	// API
+
+	this.enabled = true;
+
+	this.screen = { left: 0, top: 0, width: 0, height: 0 };
+
+	this.rotateSpeed = 1.0;
+	this.zoomSpeed = 1.2;
+	this.panSpeed = 0.3;
+
+	this.noRotate = false;
+	this.noZoom = false;
+	this.noPan = false;
+
+	this.staticMoving = false;
+	this.dynamicDampingFactor = 0.2;
+
+	this.minDistance = 0;
+	this.maxDistance = Infinity;
+
+	this.keys = [ 65 /*A*/, 83 /*S*/, 68 /*D*/ ];
+
+	// internals
+
+	this.target = new THREE.Vector3();
+
+	var EPS = 0.000001;
+
+	var lastPosition = new THREE.Vector3();
+
+	var _state = STATE.NONE,
+	_prevState = STATE.NONE,
+
+	_eye = new THREE.Vector3(),
+
+	_movePrev = new THREE.Vector2(),
+	_moveCurr = new THREE.Vector2(),
+
+	_lastAxis = new THREE.Vector3(),
+	_lastAngle = 0,
+
+	_zoomStart = new THREE.Vector2(),
+	_zoomEnd = new THREE.Vector2(),
+
+	_touchZoomDistanceStart = 0,
+	_touchZoomDistanceEnd = 0,
+
+	_panStart = new THREE.Vector2(),
+	_panEnd = new THREE.Vector2();
+
+	// for reset
+
+	this.target0 = this.target.clone();
+	this.position0 = this.object.position.clone();
+	this.up0 = this.object.up.clone();
+
+	// events
+
+	var changeEvent = { type: 'change' };
+	var startEvent = { type: 'start' };
+	var endEvent = { type: 'end' };
+
+
+	// methods
+
+	this.handleResize = function () {
+
+		if ( this.domElement === document ) {
+
+			this.screen.left = 0;
+			this.screen.top = 0;
+			this.screen.width = window.innerWidth;
+			this.screen.height = window.innerHeight;
+
+		} else {
+
+			var box = this.domElement.getBoundingClientRect();
+			// adjustments come from similar code in the jquery offset() function
+			var d = this.domElement.ownerDocument.documentElement;
+			this.screen.left = box.left + window.pageXOffset - d.clientLeft;
+			this.screen.top = box.top + window.pageYOffset - d.clientTop;
+			this.screen.width = box.width;
+			this.screen.height = box.height;
+
+		}
+
+	};
+
+	this.handleEvent = function ( event ) {
+
+		if ( typeof this[ event.type ] == 'function' ) {
+
+			this[ event.type ]( event );
+
+		}
+
+	};
+
+	var getMouseOnScreen = ( function () {
+
+		var vector = new THREE.Vector2();
+
+		return function getMouseOnScreen( pageX, pageY ) {
+
+			vector.set(
+				( pageX - _this.screen.left ) / _this.screen.width,
+				( pageY - _this.screen.top ) / _this.screen.height
+			);
+
+			return vector;
+
+		};
+
+	}() );
+
+	var getMouseOnCircle = ( function () {
+
+		var vector = new THREE.Vector2();
+
+		return function getMouseOnCircle( pageX, pageY ) {
+
+			vector.set(
+				( ( pageX - _this.screen.width * 0.5 - _this.screen.left ) / ( _this.screen.width * 0.5 ) ),
+				( ( _this.screen.height + 2 * ( _this.screen.top - pageY ) ) / _this.screen.width ) // screen.width intentional
+			);
+
+			return vector;
+
+		};
+
+	}() );
+
+	this.rotateCamera = ( function() {
+
+		var axis = new THREE.Vector3(),
+			quaternion = new THREE.Quaternion(),
+			eyeDirection = new THREE.Vector3(),
+			objectUpDirection = new THREE.Vector3(),
+			objectSidewaysDirection = new THREE.Vector3(),
+			moveDirection = new THREE.Vector3(),
+			angle;
+
+		return function rotateCamera() {
+
+			moveDirection.set( _moveCurr.x - _movePrev.x, _moveCurr.y - _movePrev.y, 0 );
+			angle = moveDirection.length();
+
+			if ( angle ) {
+
+				_eye.copy( _this.object.position ).sub( _this.target );
+
+				eyeDirection.copy( _eye ).normalize();
+				objectUpDirection.copy( _this.object.up ).normalize();
+				objectSidewaysDirection.crossVectors( objectUpDirection, eyeDirection ).normalize();
+
+				objectUpDirection.setLength( _moveCurr.y - _movePrev.y );
+				objectSidewaysDirection.setLength( _moveCurr.x - _movePrev.x );
+
+				moveDirection.copy( objectUpDirection.add( objectSidewaysDirection ) );
+
+				axis.crossVectors( moveDirection, _eye ).normalize();
+
+				angle *= _this.rotateSpeed;
+				quaternion.setFromAxisAngle( axis, angle );
+
+				_eye.applyQuaternion( quaternion );
+				_this.object.up.applyQuaternion( quaternion );
+
+				_lastAxis.copy( axis );
+				_lastAngle = angle;
+
+			} else if ( ! _this.staticMoving && _lastAngle ) {
+
+				_lastAngle *= Math.sqrt( 1.0 - _this.dynamicDampingFactor );
+				_eye.copy( _this.object.position ).sub( _this.target );
+				quaternion.setFromAxisAngle( _lastAxis, _lastAngle );
+				_eye.applyQuaternion( quaternion );
+				_this.object.up.applyQuaternion( quaternion );
+
+			}
+
+			_movePrev.copy( _moveCurr );
+
+		};
+
+	}() );
+
+
+	this.zoomCamera = function () {
+
+		var factor;
+
+		if ( _state === STATE.TOUCH_ZOOM_PAN ) {
+
+			factor = _touchZoomDistanceStart / _touchZoomDistanceEnd;
+			_touchZoomDistanceStart = _touchZoomDistanceEnd;
+			_eye.multiplyScalar( factor );
+
+		} else {
+
+			factor = 1.0 + ( _zoomEnd.y - _zoomStart.y ) * _this.zoomSpeed;
+
+			if ( factor !== 1.0 && factor > 0.0 ) {
+
+				_eye.multiplyScalar( factor );
+
+				if ( _this.staticMoving ) {
+
+					_zoomStart.copy( _zoomEnd );
+
+				} else {
+
+					_zoomStart.y += ( _zoomEnd.y - _zoomStart.y ) * this.dynamicDampingFactor;
+
+				}
+
+			}
+
+		}
+
+	};
+
+	this.panCamera = ( function() {
+
+		var mouseChange = new THREE.Vector2(),
+			objectUp = new THREE.Vector3(),
+			pan = new THREE.Vector3();
+
+		return function panCamera() {
+
+			mouseChange.copy( _panEnd ).sub( _panStart );
+
+			if ( mouseChange.lengthSq() ) {
+
+				mouseChange.multiplyScalar( _eye.length() * _this.panSpeed );
+
+				pan.copy( _eye ).cross( _this.object.up ).setLength( mouseChange.x );
+				pan.add( objectUp.copy( _this.object.up ).setLength( mouseChange.y ) );
+
+				_this.object.position.add( pan );
+				_this.target.add( pan );
+
+				if ( _this.staticMoving ) {
+
+					_panStart.copy( _panEnd );
+
+				} else {
+
+					_panStart.add( mouseChange.subVectors( _panEnd, _panStart ).multiplyScalar( _this.dynamicDampingFactor ) );
+
+				}
+
+			}
+
+		};
+
+	}() );
+
+	this.checkDistances = function () {
+
+		if ( ! _this.noZoom || ! _this.noPan ) {
+
+			if ( _eye.lengthSq() > _this.maxDistance * _this.maxDistance ) {
+
+				_this.object.position.addVectors( _this.target, _eye.setLength( _this.maxDistance ) );
+				_zoomStart.copy( _zoomEnd );
+
+			}
+
+			if ( _eye.lengthSq() < _this.minDistance * _this.minDistance ) {
+
+				_this.object.position.addVectors( _this.target, _eye.setLength( _this.minDistance ) );
+				_zoomStart.copy( _zoomEnd );
+
+			}
+
+		}
+
+	};
+
+	this.update = function () {
+
+		_eye.subVectors( _this.object.position, _this.target );
+
+		if ( ! _this.noRotate ) {
+
+			_this.rotateCamera();
+
+		}
+
+		if ( ! _this.noZoom ) {
+
+			_this.zoomCamera();
+
+		}
+
+		if ( ! _this.noPan ) {
+
+			_this.panCamera();
+
+		}
+
+		_this.object.position.addVectors( _this.target, _eye );
+
+		_this.checkDistances();
+
+		_this.object.lookAt( _this.target );
+
+		if ( lastPosition.distanceToSquared( _this.object.position ) > EPS ) {
+
+			_this.dispatchEvent( changeEvent );
+
+			lastPosition.copy( _this.object.position );
+
+		}
+
+	};
+
+	this.reset = function () {
+
+		_state = STATE.NONE;
+		_prevState = STATE.NONE;
+
+		_this.target.copy( _this.target0 );
+		_this.object.position.copy( _this.position0 );
+		_this.object.up.copy( _this.up0 );
+
+		_eye.subVectors( _this.object.position, _this.target );
+
+		_this.object.lookAt( _this.target );
+
+		_this.dispatchEvent( changeEvent );
+
+		lastPosition.copy( _this.object.position );
+
+	};
+
+	// listeners
+
+	function keydown( event ) {
+
+		if ( _this.enabled === false ) return;
+
+		window.removeEventListener( 'keydown', keydown );
+
+		_prevState = _state;
+
+		if ( _state !== STATE.NONE ) {
+
+			return;
+
+		} else if ( event.keyCode === _this.keys[ STATE.ROTATE ] && ! _this.noRotate ) {
+
+			_state = STATE.ROTATE;
+
+		} else if ( event.keyCode === _this.keys[ STATE.ZOOM ] && ! _this.noZoom ) {
+
+			_state = STATE.ZOOM;
+
+		} else if ( event.keyCode === _this.keys[ STATE.PAN ] && ! _this.noPan ) {
+
+			_state = STATE.PAN;
+
+		}
+
+	}
+
+	function keyup( event ) {
+
+		if ( _this.enabled === false ) return;
+
+		_state = _prevState;
+
+		window.addEventListener( 'keydown', keydown, false );
+
+	}
+
+	function mousedown( event ) {
+
+		if ( _this.enabled === false ) return;
+
+		event.preventDefault();
+		event.stopPropagation();
+
+		if ( _state === STATE.NONE ) {
+
+			_state = event.button;
+
+		}
+
+		if ( _state === STATE.ROTATE && ! _this.noRotate ) {
+
+			_moveCurr.copy( getMouseOnCircle( event.pageX, event.pageY ) );
+			_movePrev.copy( _moveCurr );
+
+		} else if ( _state === STATE.ZOOM && ! _this.noZoom ) {
+
+			_zoomStart.copy( getMouseOnScreen( event.pageX, event.pageY ) );
+			_zoomEnd.copy( _zoomStart );
+
+		} else if ( _state === STATE.PAN && ! _this.noPan ) {
+
+			_panStart.copy( getMouseOnScreen( event.pageX, event.pageY ) );
+			_panEnd.copy( _panStart );
+
+		}
+
+		document.addEventListener( 'mousemove', mousemove, false );
+		document.addEventListener( 'mouseup', mouseup, false );
+
+		_this.dispatchEvent( startEvent );
+
+	}
+
+	function mousemove( event ) {
+
+		if ( _this.enabled === false ) return;
+
+		event.preventDefault();
+		event.stopPropagation();
+
+		if ( _state === STATE.ROTATE && ! _this.noRotate ) {
+
+			_movePrev.copy( _moveCurr );
+			_moveCurr.copy( getMouseOnCircle( event.pageX, event.pageY ) );
+
+		} else if ( _state === STATE.ZOOM && ! _this.noZoom ) {
+
+			_zoomEnd.copy( getMouseOnScreen( event.pageX, event.pageY ) );
+
+		} else if ( _state === STATE.PAN && ! _this.noPan ) {
+
+			_panEnd.copy( getMouseOnScreen( event.pageX, event.pageY ) );
+
+		}
+
+	}
+
+	function mouseup( event ) {
+
+		if ( _this.enabled === false ) return;
+
+		event.preventDefault();
+		event.stopPropagation();
+
+		_state = STATE.NONE;
+
+		document.removeEventListener( 'mousemove', mousemove );
+		document.removeEventListener( 'mouseup', mouseup );
+		_this.dispatchEvent( endEvent );
+
+	}
+
+	function mousewheel( event ) {
+
+		if ( _this.enabled === false ) return;
+
+		event.preventDefault();
+		event.stopPropagation();
+
+		var delta = 0;
+
+		if ( event.wheelDelta ) {
+
+			// WebKit / Opera / Explorer 9
+
+			delta = event.wheelDelta / 40;
+
+		} else if ( event.detail ) {
+
+			// Firefox
+
+			delta = - event.detail / 3;
+
+		}
+
+		_zoomStart.y += delta * 0.01;
+		_this.dispatchEvent( startEvent );
+		_this.dispatchEvent( endEvent );
+
+	}
+
+	function touchstart( event ) {
+
+		if ( _this.enabled === false ) return;
+
+		switch ( event.touches.length ) {
+
+			case 1:
+				_state = STATE.TOUCH_ROTATE;
+				_moveCurr.copy( getMouseOnCircle( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY ) );
+				_movePrev.copy( _moveCurr );
+				break;
+
+			case 2:
+				_state = STATE.TOUCH_ZOOM_PAN;
+				var dx = event.touches[ 0 ].pageX - event.touches[ 1 ].pageX;
+				var dy = event.touches[ 0 ].pageY - event.touches[ 1 ].pageY;
+				_touchZoomDistanceEnd = _touchZoomDistanceStart = Math.sqrt( dx * dx + dy * dy );
+
+				var x = ( event.touches[ 0 ].pageX + event.touches[ 1 ].pageX ) / 2;
+				var y = ( event.touches[ 0 ].pageY + event.touches[ 1 ].pageY ) / 2;
+				_panStart.copy( getMouseOnScreen( x, y ) );
+				_panEnd.copy( _panStart );
+				break;
+
+			default:
+				_state = STATE.NONE;
+
+		}
+		_this.dispatchEvent( startEvent );
+
+
+	}
+
+	function touchmove( event ) {
+
+		if ( _this.enabled === false ) return;
+
+		event.preventDefault();
+		event.stopPropagation();
+
+		switch ( event.touches.length ) {
+
+			case 1:
+				_movePrev.copy( _moveCurr );
+				_moveCurr.copy( getMouseOnCircle(  event.touches[ 0 ].pageX, event.touches[ 0 ].pageY ) );
+				break;
+
+			case 2:
+				var dx = event.touches[ 0 ].pageX - event.touches[ 1 ].pageX;
+				var dy = event.touches[ 0 ].pageY - event.touches[ 1 ].pageY;
+				_touchZoomDistanceEnd = Math.sqrt( dx * dx + dy * dy );
+
+				var x = ( event.touches[ 0 ].pageX + event.touches[ 1 ].pageX ) / 2;
+				var y = ( event.touches[ 0 ].pageY + event.touches[ 1 ].pageY ) / 2;
+				_panEnd.copy( getMouseOnScreen( x, y ) );
+				break;
+
+			default:
+				_state = STATE.NONE;
+
+		}
+
+	}
+
+	function touchend( event ) {
+
+		if ( _this.enabled === false ) return;
+
+		switch ( event.touches.length ) {
+
+			case 1:
+				_movePrev.copy( _moveCurr );
+				_moveCurr.copy( getMouseOnCircle(  event.touches[ 0 ].pageX, event.touches[ 0 ].pageY ) );
+				break;
+
+			case 2:
+				_touchZoomDistanceStart = _touchZoomDistanceEnd = 0;
+
+				var x = ( event.touches[ 0 ].pageX + event.touches[ 1 ].pageX ) / 2;
+				var y = ( event.touches[ 0 ].pageY + event.touches[ 1 ].pageY ) / 2;
+				_panEnd.copy( getMouseOnScreen( x, y ) );
+				_panStart.copy( _panEnd );
+				break;
+
+		}
+
+		_state = STATE.NONE;
+		_this.dispatchEvent( endEvent );
+
+	}
+
+	function contextmenu( event ) {
+
+		event.preventDefault();
+
+	}
+
+	this.dispose = function() {
+
+		this.domElement.removeEventListener( 'contextmenu', contextmenu, false );
+		this.domElement.removeEventListener( 'mousedown', mousedown, false );
+		this.domElement.removeEventListener( 'mousewheel', mousewheel, false );
+		this.domElement.removeEventListener( 'MozMousePixelScroll', mousewheel, false ); // firefox
+
+		this.domElement.removeEventListener( 'touchstart', touchstart, false );
+		this.domElement.removeEventListener( 'touchend', touchend, false );
+		this.domElement.removeEventListener( 'touchmove', touchmove, false );
+
+		document.removeEventListener( 'mousemove', mousemove, false );
+		document.removeEventListener( 'mouseup', mouseup, false );
+
+		window.removeEventListener( 'keydown', keydown, false );
+		window.removeEventListener( 'keyup', keyup, false );
+
+	}
+
+	this.domElement.addEventListener( 'contextmenu', contextmenu, false );
+	this.domElement.addEventListener( 'mousedown', mousedown, false );
+	this.domElement.addEventListener( 'mousewheel', mousewheel, false );
+	this.domElement.addEventListener( 'MozMousePixelScroll', mousewheel, false ); // firefox
+
+	this.domElement.addEventListener( 'touchstart', touchstart, false );
+	this.domElement.addEventListener( 'touchend', touchend, false );
+	this.domElement.addEventListener( 'touchmove', touchmove, false );
+
+	window.addEventListener( 'keydown', keydown, false );
+	window.addEventListener( 'keyup', keyup, false );
+
+	this.handleResize();
+
+	// force an update at start
+	this.update();
+
+};
+
+THREE.TrackballControls.prototype = Object.create( THREE.EventDispatcher.prototype );
+THREE.TrackballControls.prototype.constructor = THREE.TrackballControls;
 

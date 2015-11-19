@@ -60,6 +60,5 @@
 	"src/extras/helpers/SpotLightHelper.js",
 	"src/extras/helpers/VertexNormalsHelper.js",
 	"src/extras/helpers/WireframeHelper.js",
-	"src/extras/objects/ImmediateRenderObject.js",
-	"src/extras/objects/MorphBlendMesh.js"
+  "src/extras/objects/MorphBlendMesh.js"
 ]
